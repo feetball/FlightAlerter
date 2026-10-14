@@ -21,6 +21,11 @@ async function post(path, body) {
 async function init() {
   const status = await fetch('/api/auth/status').then((r) => r.json());
   if (status.logged_in) { location.replace('/'); return; }
+  if (status.version && status.version !== 'unknown') {
+    const badge = document.getElementById('app-version');
+    badge.textContent = 'v' + status.version;
+    badge.hidden = false;
+  }
   const form = document.getElementById(status.configured ? 'login-form' : 'setup-form');
   form.hidden = false;
   form.querySelector('input').focus();

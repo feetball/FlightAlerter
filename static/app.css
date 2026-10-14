@@ -48,6 +48,7 @@ code { font-family: var(--mono); font-size: 12px; background: var(--surface-3); 
   border-bottom: 1px solid var(--border);
 }
 .brand { display: flex; align-items: center; gap: 10px; font-weight: 650; font-size: 15px; white-space: nowrap; }
+.version { font-weight: 600; font-size: 11px; color: var(--text-2); border: 1px solid var(--border-strong); border-radius: 999px; padding: 1px 8px; font-family: var(--mono); }
 .brand-mark { width: 22px; height: 22px; fill: var(--military); transform: rotate(45deg); }
 .tabs { display: flex; gap: 2px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 3px; }
 .tabs button {

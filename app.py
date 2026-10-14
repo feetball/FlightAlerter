@@ -42,6 +42,8 @@ MAX_LOGIN_FAILURES = 5
 LOGIN_LOCKOUT_SECONDS = 15 * 60
 MIN_PASSWORD_LENGTH = 8
 
+VERSION = paths.app_version()
+
 state = {
     'started_at': time.time(),
     'running': False,
@@ -194,7 +196,7 @@ def login_page():
 
 @app.route('/api/auth/status')
 def api_auth_status():
-    return jsonify({'configured': secret_store.admin_configured(), 'logged_in': is_logged_in()})
+    return jsonify({'configured': secret_store.admin_configured(), 'logged_in': is_logged_in(), 'version': VERSION})
 
 
 @app.route('/api/auth/setup', methods=['POST'])
@@ -338,6 +340,7 @@ def api_status():
     smtp = alerter.smtp_config(settings)
     with state_lock:
         return jsonify({
+            'version': VERSION,
             'now': time.time(),
             'started_at': state['started_at'],
             'running': state['running'],
@@ -521,7 +524,7 @@ def main():
     state['last_email_at'] = alerter.last_alert_time()
     threading.Thread(target=scheduler_loop, name='scheduler', daemon=True).start()
     port = int(os.environ.get('WEB_PORT', '8095'))
-    logger.info('Web UI listening on port ' + str(port))
+    logger.info('Flight Alerter ' + VERSION + ': web UI listening on port ' + str(port))
     serve(app, host='0.0.0.0', port=port, threads=8)
 
 

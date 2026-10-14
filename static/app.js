@@ -315,6 +315,8 @@ $('#military-list').addEventListener('keydown', (event) => {
 async function refreshStatus() {
   try {
     ui.status = await api('/api/status');
+    $('#app-version').textContent = 'v' + ui.status.version;
+    $('#app-version').hidden = !ui.status.version || ui.status.version === 'unknown';
     $('#banner').hidden = true;
     renderStatus();
     renderTrend(ui.status.history);

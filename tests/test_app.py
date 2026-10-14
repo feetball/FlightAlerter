@@ -23,6 +23,19 @@ class SchedulerTest(unittest.TestCase):
         self.assertIsNotNone(webapp.state['next_run_at'])
 
 
+class VersionTest(unittest.TestCase):
+    def test_version_comes_from_the_version_file_and_is_in_status(self):
+        self.assertRegex(webapp.VERSION, r'^\d+\.\d+\.\d+')
+        with open(webapp.os.path.join(webapp.paths.APP_DIR, 'VERSION')) as handle:
+            self.assertEqual(webapp.VERSION, handle.read().strip())
+        webapp.app.secret_key = 'test'
+        version = secret_store.set_admin_password('correct horse')
+        client = webapp.app.test_client()
+        with client.session_transaction() as session:
+            session.update({'user': 'admin', 'password_version': version})
+        self.assertEqual(client.get('/api/status').get_json()['version'], webapp.VERSION)
+
+
 class LoginThrottleTest(unittest.TestCase):
     def setUp(self):
         webapp.login_failures.clear()

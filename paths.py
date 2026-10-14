@@ -11,6 +11,15 @@ DATA_FILES = ('settings.json', 'secrets.json', 'sentAlerts.csv', 'militaryFlight
 logger = logging.getLogger('flightAlerter')
 
 
+def app_version():
+    """The release number from the VERSION file (the one place to change it when releasing)."""
+    try:
+        with open(os.path.join(APP_DIR, 'VERSION')) as handle:
+            return handle.read().strip() or 'unknown'
+    except OSError:
+        return 'unknown'
+
+
 def prepare_data_dir():
     """Creates the data folder and, when running from the code folder without DATA_DIR, moves files
     left there by older versions into it. (deploy.sh does the same for Docker installs.)"""
