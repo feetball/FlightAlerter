@@ -8,7 +8,7 @@ import secrets
 import threading
 
 
-SECRETS_FILENAME = './secrets.json'
+SECRETS_FILENAME = os.path.join(os.environ.get('DATA_DIR', '.'), 'secrets.json')
 PBKDF2_ITERATIONS = 600000
 
 _lock = threading.Lock()

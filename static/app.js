@@ -78,7 +78,11 @@ function toast(message, kind = '') {
 
 function showTab(name) {
   ui.tab = name;
-  document.querySelectorAll('.tabs button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === name)));
+  document.querySelectorAll('.tabs button').forEach((b) => {
+    const selected = b.dataset.tab === name;
+    b.setAttribute('aria-selected', String(selected));
+    b.tabIndex = selected ? 0 : -1;  // roving tabindex: only the selected tab is in the tab order
+  });
   document.querySelectorAll('.tab-panel').forEach((p) => { p.hidden = p.id !== 'tab-' + name; });
   try { localStorage.setItem('flightAlerter.tab', name); } catch (_) { /* storage blocked */ }
   if (name === 'dashboard') { map.invalidateSize(); refreshAircraft(); }
@@ -88,6 +92,17 @@ function showTab(name) {
 }
 
 document.querySelectorAll('.tabs button').forEach((b) => b.addEventListener('click', () => showTab(b.dataset.tab)));
+$('.tabs').addEventListener('keydown', (event) => {
+  const tabs = [...document.querySelectorAll('.tabs button')];
+  const current = tabs.indexOf(event.target);
+  if (current < 0) return;
+  const next = { ArrowLeft: current - 1, ArrowRight: current + 1, Home: 0, End: tabs.length - 1 }[event.key];
+  if (next === undefined) return;
+  event.preventDefault();
+  const tab = tabs[(next + tabs.length) % tabs.length];
+  showTab(tab.dataset.tab);
+  tab.focus();
+});
 
 // ---------- map ----------
 
@@ -245,7 +260,7 @@ function renderWatchStatus(payload) {
     const ac = matches[0];
     const inRange = ac && ac.distance <= entry.radius_miles;
     const classes = ['ac-item', 'watch-item', ac ? 'in-view' : '', inRange ? 'in-range' : '', entry.enabled ? '' : 'off'].join(' ');
-    return '<li class="' + classes + '"' + (ac ? ' data-hex="' + escapeHtml(ac.hex) + '" tabindex="0"' : '') + '>' +
+    return '<li class="' + classes + '"' + (ac ? ' data-hex="' + escapeHtml(ac.hex) + '" role="button" tabindex="0"' : '') + '>' +
       '<span class="ac-call">' + escapeHtml(entry.label) + '</span>' +
       '<span class="ac-dist">' + (ac ? ac.distance + ' mi' : '–') + '</span>' +
       '<span class="ac-meta">' + (entry.label !== entry.match ? escapeHtml(entry.match) + ' · ' : '') +
@@ -258,6 +273,10 @@ function renderWatchStatus(payload) {
 $('#watch-status').addEventListener('click', (event) => {
   const item = event.target.closest('.ac-item[data-hex]');
   if (item) focusAircraft(item.dataset.hex);
+});
+$('#watch-status').addEventListener('keydown', (event) => {
+  const item = event.target.closest('.ac-item[data-hex]');
+  if (item && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); focusAircraft(item.dataset.hex); }
 });
 $('#edit-watchlist').addEventListener('click', () => {
   showTab('settings');

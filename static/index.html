@@ -17,10 +17,10 @@
     </div>
 
     <nav class="tabs" role="tablist">
-      <button role="tab" data-tab="dashboard" aria-selected="true">Dashboard</button>
-      <button role="tab" data-tab="alerts">Alerts</button>
-      <button role="tab" data-tab="settings">Settings</button>
-      <button role="tab" data-tab="log">Log</button>
+      <button role="tab" id="tab-btn-dashboard" data-tab="dashboard" aria-controls="tab-dashboard" aria-selected="true">Dashboard</button>
+      <button role="tab" id="tab-btn-alerts" data-tab="alerts" aria-controls="tab-alerts" aria-selected="false" tabindex="-1">Alerts</button>
+      <button role="tab" id="tab-btn-settings" data-tab="settings" aria-controls="tab-settings" aria-selected="false" tabindex="-1">Settings</button>
+      <button role="tab" id="tab-btn-log" data-tab="log" aria-controls="tab-log" aria-selected="false" tabindex="-1">Log</button>
     </nav>
 
     <div class="topbar-status">
@@ -42,7 +42,7 @@
 
   <main>
     <!-- Dashboard -->
-    <section id="tab-dashboard" class="tab-panel">
+    <section id="tab-dashboard" class="tab-panel" role="tabpanel" aria-labelledby="tab-btn-dashboard">
       <div class="dash-grid">
         <div class="card map-card">
           <div class="card-head">
@@ -109,7 +109,7 @@
     </section>
 
     <!-- Alerts -->
-    <section id="tab-alerts" class="tab-panel" hidden>
+    <section id="tab-alerts" class="tab-panel" role="tabpanel" aria-labelledby="tab-btn-alerts" hidden>
       <div class="card">
         <div class="card-head">
           <h2>Sent alerts</h2>
@@ -127,7 +127,7 @@
     </section>
 
     <!-- Settings -->
-    <section id="tab-settings" class="tab-panel" hidden>
+    <section id="tab-settings" class="tab-panel" role="tabpanel" aria-labelledby="tab-btn-settings" hidden>
       <form id="settings-form" class="settings" novalidate>
         <div class="card">
           <h2>Alerting</h2>
@@ -316,7 +316,7 @@
     </section>
 
     <!-- Log -->
-    <section id="tab-log" class="tab-panel" hidden>
+    <section id="tab-log" class="tab-panel" role="tabpanel" aria-labelledby="tab-btn-log" hidden>
       <div class="card">
         <div class="card-head">
           <h2>Activity log</h2>
