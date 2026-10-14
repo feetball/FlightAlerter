@@ -3,6 +3,8 @@
 Sends an email when a military aircraft, or an aircraft on your watchlist, flies near
 your location. It reads live positions from your own ADS-B receiver.
 
+![Dashboard: live map with military and watchlist aircraft highlighted inside the alert radius](docs/screenshots/dashboard.jpg)
+
 Every minute (configurable) it fetches `aircraft.json` from a SkyAware / tar1090 /
 readsb receiver and sends email for:
 
@@ -10,7 +12,8 @@ readsb receiver and sends email for:
   distance
 - **Watchlist aircraft** within their own radius, one email per watchlist entry. Entries
   are matched by tail number, callsign or ICAO hex code, and can have their own
-  recipients and subject.
+  recipients and subject. One entry can list several aircraft that share the same
+  settings, such as every tail number a friend might fly.
 
 Aircraft type and registration are looked up in the receiver's aircraft database. That
 means a tail number on the watchlist is recognised even when the aircraft isn't
@@ -24,6 +27,10 @@ A password-protected web dashboard (port 8095 by default) shows:
 - the history of sent alerts, with a button to reset any aircraft
 - settings for everything, including the watchlist and the email server
 - an activity log
+
+It also works on a phone:
+
+<img src="docs/screenshots/mobile.jpg" alt="Dashboard on a phone" width="300">
 
 ## Requirements
 
@@ -47,6 +54,9 @@ A password-protected web dashboard (port 8095 by default) shows:
    ```
 
    A new code is printed every time the service starts until a password is set.
+   Afterwards the same page asks only for the password:
+
+   <img src="docs/screenshots/login.png" alt="Sign-in page" width="400">
 
 3. Fill in the **Settings** page: receiver URL, home location, recipients, email server,
    watchlist. Use **Send test email** to check the email settings.
@@ -124,14 +134,17 @@ Open `http://<host>:8095` and sign in.
   alert radius around your home location. Click an aircraft for its type, registration,
   hex code, distance, altitude, speed, heading and squawk. **Military & watchlist only**
   hides other traffic.
+
+  <img src="docs/screenshots/map-popup.jpg" alt="Aircraft details popup on the map" width="600">
 - **Stat cards**: aircraft on the map (with a position fix), military aircraft anywhere
   in receiver range, military aircraft inside the alert radius, and when the last email
   went out. If that card says *Emails off* or *Not set up*, see Settings.
 - **Military aircraft** lists the military aircraft in view, nearest first. Items inside
   the radius are highlighted. Click one (or select it and press Enter) to fly the map to
   it.
-- **Watchlist** shows each watched aircraft and whether it is in view. Click one in view
-  to find it on the map. **Edit** jumps to the watchlist in Settings.
+- **Watchlist** shows each watchlist entry and whether it is in view. For an entry listing
+  several aircraft, it names the nearest one in view. Click one in view to find it on the
+  map. **Edit** jumps to the watchlist in Settings.
 - **Traffic per check** charts how many aircraft each recent check saw. Hover for the
   exact count. It starts empty after a restart.
 
@@ -143,12 +156,16 @@ row shows the callsign, when the last email was sent and how many have been sent
 **Reset** clears that row's history so the aircraft can alert again, for example after
 you raise the per-aircraft limit or want a fresh email the next time it passes.
 
+![Alerts page](docs/screenshots/alerts.png)
+
 ### Settings
 
 Changes are not applied until you press **Save settings** in the bar that appears at
 the bottom. **Discard** puts the form back to the saved values. Fields with problems are
 marked in red, and nothing is saved until they are fixed. Saving runs a check straight
 away when monitoring is on.
+
+![Settings page](docs/screenshots/settings.png)
 
 - **Alerting**: monitoring on/off (same as the top-bar switch), **Send emails** (turn
   off to watch the dashboard without sending mail), the military alert radius, default
@@ -158,9 +175,14 @@ away when monitoring is on.
   answers and shows how many aircraft it reports. **Use receiver's location** fills in
   home latitude and longitude from the receiver, if it publishes them. Save afterwards.
 - **Watchlist**: **Add aircraft**, then enter a tail number (`N251BP`), callsign
-  (`SWA2713`) or ICAO hex code (`A1B2C3`). Optional nickname, radius, recipients and
-  subject per entry. Blank recipients use the default recipients; a blank subject
-  becomes "*name* is within *N* mi". Untick an entry to pause it without deleting it.
+  (`SWA2713`) or ICAO hex code (`A1B2C3`). To give several aircraft the same settings,
+  list them in one entry separated by commas (`N324FX, N268FX, N335FX`, up to 50).
+  Optional nickname, radius, recipients and subject per entry. Blank recipients use the
+  default recipients. In the subject, `<aircraft>` is replaced by the aircraft the email
+  is about and `<radius>` by the entry's radius, so `Jim might be within <radius> mi in
+  <aircraft>` becomes "Jim might be within 40 mi in N268FX". A blank subject becomes
+  "*nickname* is within *N* mi", or "*aircraft* is within *N* mi" without a nickname.
+  Untick an entry to pause it without deleting it.
 - **Timing & limits**: how often to check, emails per aircraft, the wait between repeat
   emails, and how long since an aircraft was last heard before it is ignored.
 - **Email server**: SMTP host, encryption (SSL/TLS, usually port 465, or STARTTLS,
@@ -174,6 +196,8 @@ away when monitoring is on.
 The service's recent activity: checks, emails sent, settings changes, sign-ins and
 errors. **Follow** keeps the newest line in view. It holds the last 300 lines and is
 cleared on restart; `docker compose logs flightalerter` has the full history.
+
+![Log page](docs/screenshots/log.png)
 
 ### Troubleshooting
 

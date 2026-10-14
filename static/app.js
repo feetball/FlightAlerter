@@ -263,10 +263,17 @@ function renderWatchStatus(payload) {
     const ac = matches[0];
     const inRange = ac && ac.distance <= entry.radius_miles;
     const classes = ['ac-item', 'watch-item', ac ? 'in-view' : '', inRange ? 'in-range' : '', entry.enabled ? '' : 'off'].join(' ');
-    return '<li class="' + classes + '"' + (ac ? ' data-hex="' + escapeHtml(ac.hex) + '" role="button" tabindex="0"' : '') + '>' +
+    // An entry can list several aircraft: name the nearest one in view, or say how many are listed.
+    let idents = entry.label !== entry.match ? entry.match : '';
+    if (entry.idents.length > 1) {
+      idents = ac ? ac.watched.find((w) => w.id === entry.id).ident + (matches.length > 1 ? ' +' + (matches.length - 1) + ' more' : '') + ' in view'
+        : entry.idents.length + ' aircraft';
+    }
+    return '<li class="' + classes + '"' + (ac ? ' data-hex="' + escapeHtml(ac.hex) + '" role="button" tabindex="0"' : '') +
+      (entry.idents.length > 1 ? ' title="' + escapeHtml(entry.match) + '"' : '') + '>' +
       '<span class="ac-call">' + escapeHtml(entry.label) + '</span>' +
       '<span class="ac-dist">' + (ac ? ac.distance + ' mi' : '–') + '</span>' +
-      '<span class="ac-meta">' + (entry.label !== entry.match ? escapeHtml(entry.match) + ' · ' : '') +
+      '<span class="ac-meta">' + (idents ? escapeHtml(idents) + ' · ' : '') +
         (entry.enabled ? 'alerts within ' + entry.radius_miles + ' mi' : 'alerts off') + '</span>' +
       '<span class="ac-meta-r">' + (ac ? escapeHtml(formatAltitude(ac.altitude)) : 'not in view') + '</span>' +
       '</li>';
@@ -586,10 +593,21 @@ function watchRow(entry) {
   return row;
 }
 
+// The aircraft box wraps a long list onto more lines instead of scrolling it out of sight.
+function fitAircraftBox(box) {
+  box.style.height = 'auto';
+  if (box.scrollHeight) box.style.height = (box.scrollHeight + box.offsetHeight - box.clientHeight) + 'px';
+}
+
+function fitAircraftBoxes() {
+  document.querySelectorAll('#watch-rows [data-watch="match"]').forEach(fitAircraftBox);
+}
+
 function renderWatchRows(entries) {
   const container = $('#watch-rows');
   container.replaceChildren(...entries.map(watchRow));
   $('#watch-empty').hidden = entries.length > 0;
+  fitAircraftBoxes();
 }
 
 function watchRowsValues() {
@@ -628,13 +646,22 @@ $('#watch-rows').addEventListener('change', (event) => {
   if (event.target.dataset.watch === 'enabled') event.target.closest('.watch-row').classList.toggle('disabled', !event.target.checked);
 });
 
+$('#watch-rows').addEventListener('input', (event) => {
+  if (event.target.dataset.watch === 'match') fitAircraftBox(event.target);
+});
+$('#watch-rows').addEventListener('keydown', (event) => {
+  // Enter saves, as it does in the other fields, rather than starting a new line.
+  if (event.target.dataset.watch === 'match' && event.key === 'Enter') { event.preventDefault(); form.requestSubmit(); }
+});
+window.addEventListener('resize', fitAircraftBoxes);
+
 function clearErrors() {
   form.querySelectorAll('[data-error]').forEach((el) => { el.textContent = ''; });
   form.querySelectorAll('[aria-invalid]').forEach((el) => el.removeAttribute('aria-invalid'));
 }
 
 function showErrors(errors) {
-  const watchError = errors.watchlist && /aircraft #(\d+)/.exec(errors.watchlist);
+  const watchError = errors.watchlist && /entry #(\d+)/.exec(errors.watchlist);
   if (watchError) {
     const row = document.querySelectorAll('#watch-rows .watch-row')[Number(watchError[1]) - 1];
     if (row) row.querySelector('[data-watch="match"]').setAttribute('aria-invalid', 'true');

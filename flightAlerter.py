@@ -190,10 +190,24 @@ def normalize_ident(value):
     return re.sub(r'[^A-Z0-9]', '', str(value or '').upper())
 
 
+def flight_idents(flight):
+    return {normalize_ident(flight.get(field)) for field in ('flight', 'hex', 'r')} - {''}
+
+
+def watch_idents(entry):
+    """The tail numbers, callsigns and hex codes of a watchlist entry; one entry can list several."""
+    return [part for part in re.split(r'[\s,;|]+', entry['match']) if normalize_ident(part)]
+
+
+def matched_ident(entry, flight):
+    """Which of the entry's identifiers this aircraft matched, as written in the watchlist."""
+    idents = flight_idents(flight)
+    return next((ident for ident in watch_idents(entry) if normalize_ident(ident) in idents), None)
+
+
 def watch_entries_for(flight, watchlist):
     """Watchlist entries matching this aircraft by callsign, hex code or registration (tail number)."""
-    idents = {normalize_ident(flight.get(field)) for field in ('flight', 'hex', 'r')} - {''}
-    return [entry for entry in watchlist if entry['enabled'] and normalize_ident(entry['match']) in idents]
+    return [entry for entry in watchlist if entry['enabled'] and matched_ident(entry, flight)]
 
 
 def annotate_aircraft(flight, home_coords, db_url, watchlist, db_lookup_radius=None):
@@ -223,14 +237,32 @@ def summarize_aircraft(flight):
         'squawk': flight.get('squawk'),
         'distance': flight.get('distance'),
         'military': bool(flight.get('military')),
-        'watched': [{'id': entry['id'], 'label': watch_label(entry), 'radius_miles': entry['radius_miles']}
+        'watched': [{'id': entry['id'], 'label': entry.get('label') or matched_ident(entry, flight),
+                     'ident': matched_ident(entry, flight), 'radius_miles': entry['radius_miles']}
                     for entry in flight.get('watch_entries', [])],
         'seen': flight.get('seen'),
     }
 
 
 def watch_label(entry):
-    return entry.get('label') or entry['match']
+    if entry.get('label'):
+        return entry['label']
+    idents = watch_idents(entry)
+    if len(idents) < 2:
+        return entry['match']
+    return idents[0] + ' +' + str(len(idents) - 1) + ' more'
+
+
+def watch_subject(entry, flights):
+    """The entry's subject (or the default one) with <aircraft> and <radius> filled in."""
+    template = entry['subject'] or ((entry.get('label') or '<aircraft>') + ' is within <radius> mi')
+    idents = []
+    for flight in flights:
+        ident = matched_ident(entry, flight)
+        if ident and ident not in idents:
+            idents.append(ident)
+    template = re.sub(r'<\s*aircraft\s*>', lambda _: ', '.join(idents), template, flags=re.IGNORECASE)
+    return re.sub(r'<\s*radius\s*>', lambda _: '%g' % entry['radius_miles'], template, flags=re.IGNORECASE)
 
 
 def load_sent_alerts():
@@ -321,20 +353,20 @@ def run_check(settings):
             if flight['distance'] <= settings['alert_radius_miles']:
                 result['military_in_range'].append(flight)
 
-    # Each batch is one email: all military aircraft together, then one per watchlist entry.
-    batches = [(settings['subject'], settings['distribution_list'], 'Military aircraft within range', '',
-                result['military_in_range'])]
+    # Each batch is one email: all military aircraft together (no entry), then one per watchlist entry.
+    batches = [(None, settings['distribution_list'], 'Military aircraft within range', '', result['military_in_range'])]
     for entry, flights in watch_hits.values():
-        subject = entry['subject'] or (watch_label(entry) + ' is within ' + str(entry['radius_miles']) + ' mi')
-        batches.append((subject, entry['recipients'] or settings['distribution_list'],
+        batches.append((entry, entry['recipients'] or settings['distribution_list'],
                         watch_label(entry) + ' within range', 'watch:' + entry['id'] + ':', flights))
 
     with SENT_ALERTS_LOCK:
         sent_alerts = load_sent_alerts()
-        for subject, recipients, heading, key_prefix, flights in batches:
+        for entry, recipients, heading, key_prefix, flights in batches:
             eligible_flights = select_eligible_flights(flights, sent_alerts, settings, time.time(), key_prefix)
             if not eligible_flights:
                 continue
+            # A watchlist subject names the aircraft actually being emailed about.
+            subject = watch_subject(entry, eligible_flights) if entry else settings['subject']
             result['notified'].extend(eligible_flights)
             if not settings['send_emails']:
                 # Not logged as sent, so they alert once emails are switched back on.
