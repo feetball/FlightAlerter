@@ -2,7 +2,7 @@
 FROM amancevice/pandas:latest
 #FROM alpine:latest
 ADD repositories /etc/apk/repositories
-WORKDIR /
+WORKDIR /code
 #RUN apk update
 #RUN apk add make automake gcc g++ subversion python3-dev
 #RUN apk add --no-cache gcc musl-dev linux-headers
@@ -24,5 +24,6 @@ COPY sentAlerts.csv sentAlerts.csv
 #RUN touch /var/log/cron.log
 RUN pip install -r requirements.txt
 COPY . .
-CMD ["python", "/flightAlerter.py"]
+EXPOSE 8095
+CMD ["python", "app.py"]
 #CMD ['crond', '-l 2', '-f']

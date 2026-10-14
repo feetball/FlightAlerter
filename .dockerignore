@@ -1,3 +1,5 @@
 .env
 .git
 venv/
+settings.json
+__pycache__/

@@ -8,6 +8,14 @@ It keeps aircraft that look military and are inside the alert radius, then sends
 summary email listing them by distance. Each email includes the aircraft type, which
 is looked up in the receiver's aircraft database.
 
+It also serves a web dashboard (port 8095) with:
+
+- a live map of traffic, with military aircraft highlighted and the alert radius drawn
+- status: last and next check, aircraft counts, last email, recent errors
+- the history of sent alerts, with a button to reset any aircraft
+- a settings page for the radius, recipients, home location, receiver URL and timing
+- an activity log
+
 ## Requirements
 
 - An ADS-B receiver that serves `.../data/aircraft.json` and the matching `.../db/`
@@ -33,22 +41,24 @@ is looked up in the receiver's aircraft database.
    | `HOME_LAT`          | Latitude that distances are measured from                     |
    | `HOME_LON`          | Longitude that distances are measured from                    |
    | `AIRCRAFT_DATA_URL` | Full URL to the receiver's `aircraft.json`                     |
+   | `SMTP_FROM_NAME`    | Display name on outgoing email (default `Flight Alerter`)     |
+   | `WEB_PASSWORD`      | Optional. If set, the dashboard asks for this password        |
+   | `WEB_PORT`          | Optional. Dashboard port (default `8095`)                      |
 
    `.env` is git-ignored and excluded from the Docker image. Never commit it.
 
-2. Optionally, edit `militaryFlights.csv` to change who gets alerts and the radius:
+2. Start it (see below) and open `http://<host>:8095`. Everything except the SMTP login
+   can be changed on the **Settings** page.
 
-   ```csv
-   distribution_list,military_distance,subject
-   you@example.com|friend@example.com,25,Military aircraft nearby
-   ```
+### Where settings live
 
-   - `distribution_list`: recipients, separated by `|`
-   - `military_distance`: alert radius in miles (default 25)
-   - `subject`: email subject; the aircraft count is appended
+Settings are saved to `settings.json`, which is git-ignored. On first start it is
+created from `HOME_LAT`, `HOME_LON` and `AIRCRAFT_DATA_URL` in `.env`, and from
+`militaryFlights.csv` if that file exists. After that, `settings.json` takes priority, so
+change those values on the Settings page rather than in `.env`.
 
-   Only the first row is used. If the file is missing, the script falls back to
-   `monitoredFlights.csv`, then to the defaults.
+The SMTP username and password are only ever read from `.env`. The dashboard never
+shows or stores the password.
 
 ## Running
 
@@ -58,8 +68,8 @@ With Docker:
 docker-compose up -d --build
 ```
 
-The script runs one check, sleeps 60 seconds and exits. The `restart: unless-stopped`
-policy then starts it again, so it checks about once a minute.
+The dashboard is then at `http://<host>:8095`. The container runs the code from this
+folder (mounted at `/code`), so `settings.json` and `sentAlerts.csv` survive rebuilds.
 
 Without Docker:
 
@@ -67,8 +77,17 @@ Without Docker:
 python3 -m venv venv
 venv/bin/pip install -r requirements.txt
 set -a; . ./.env; set +a
-venv/bin/python flightAlerter.py
+venv/bin/python app.py
 ```
+
+`venv/bin/python flightAlerter.py` runs a single check without the web server, which is
+handy for cron or testing.
+
+### Security
+
+The dashboard has no login unless `WEB_PASSWORD` is set. Anyone who can reach the port
+can change settings, pause alerts and send test emails. Set a password, or keep the
+port off the internet.
 
 ## How aircraft are classified as military
 
@@ -79,10 +98,14 @@ An aircraft counts as military if any of these is true:
   `COAST GUARD`
 - Its callsign matches a known military prefix (`RCH`, `REACH`, `PAT`, `SPAR`, and others)
 
-Aircraft not seen in the last 10 seconds, or with no position, are skipped.
+Aircraft not heard from in the last 10 seconds (configurable), or with no position,
+are skipped.
 
 ## Alert limits
 
-Sent alerts are logged in `sentAlerts.csv`, keyed by ICAO hex code. Each aircraft
-triggers at most two emails, and the second only comes at least 30 minutes after the
-first. Delete rows from that file to reset an aircraft.
+Sent alerts are logged in `sentAlerts.csv`, keyed by ICAO hex code. By default each
+aircraft triggers at most two emails, at least 30 minutes apart; both limits can be
+changed in Settings. To let an aircraft alert again, reset it on the **Alerts** page.
+
+While **Send emails** is off, nothing is recorded, so aircraft still in range alert
+once emails are turned back on.
