@@ -1,14 +1,17 @@
-certifi
-charset-normalizer
-geographiclib
-geopy
-idna
-numpy
-pandas
-python-dateutil
-pytz
-requests
-six
-urllib3
-flask
-waitress
+# Direct dependencies: flask, geopy, requests, waitress. Everything is pinned so rebuilds are repeatable;
+# to upgrade, change the versions here and rebuild.
+blinker==1.9.0
+certifi==2026.7.22
+charset-normalizer==3.5.2
+click==8.5.0
+Flask==3.1.3
+geographiclib==2.1
+geopy==2.5.0
+idna==3.20
+itsdangerous==2.2.0
+Jinja2==3.1.6
+MarkupSafe==3.0.4
+requests==2.34.2
+urllib3==2.8.0
+waitress==3.0.2
+Werkzeug==3.1.9

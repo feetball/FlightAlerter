@@ -1,8 +1,13 @@
 venv/
 .env
 __pycache__/
+data/
+# Where versions before data/ kept settings, secrets and history (deploy.sh moves them into data/)
 settings.json
 settings.json.tmp
 secrets.json
 secrets.json.tmp
 sentAlerts.csv
+sentAlerts.csv.tmp
+militaryFlights.csv
+monitoredFlights.csv

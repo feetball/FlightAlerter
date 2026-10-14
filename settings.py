@@ -1,15 +1,15 @@
+import csv
 import json
+import math
 import os
 import re
 import secrets
 import threading
 
-import pandas as pd
-
 import secret_store
+from paths import DATA_DIR
 
 
-DATA_DIR = os.environ.get('DATA_DIR', '.')
 SETTINGS_FILENAME = os.path.join(DATA_DIR, 'settings.json')
 LEGACY_CONFIG_FILENAMES = [os.path.join(DATA_DIR, name) for name in ('militaryFlights.csv', 'monitoredFlits.csv', 'monitoredFlights.csv')]
 LEGACY_WATCHLIST_FILENAME = os.path.join(DATA_DIR, 'monitoredFlights.csv')
@@ -17,8 +17,10 @@ LEGACY_WATCHLIST_FILENAME = os.path.join(DATA_DIR, 'monitoredFlights.csv')
 EMAIL_PATTERN = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 HOSTNAME_PATTERN = re.compile(r'^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$')
 IDENT_PATTERN = re.compile(r'^[A-Za-z0-9-]{1,20}$')
+IDENT_SEPARATORS = re.compile(r'[\s,;|]+')
 MAX_WATCHLIST_ENTRIES = 100
 MAX_AIRCRAFT_PER_ENTRY = 50
+MAX_MATCH_LENGTH = 2000
 
 # Reentrant so update_settings can hold it across load_settings() and the write.
 _lock = threading.RLock()
@@ -62,25 +64,43 @@ def default_settings():
     }
 
 
+def normalize_ident(value):
+    """Tail number, callsign or hex code reduced to letters and digits, for comparing."""
+    return re.sub(r'[^A-Z0-9]', '', str(value or '').upper())
+
+
+def split_idents(text):
+    """The aircraft listed in a watchlist entry's match field."""
+    return [part for part in IDENT_SEPARATORS.split(str(text or '')) if part]
+
+
+def _read_csv_rows(filename):
+    """An old config CSV as lists of stripped values, header row first."""
+    with open(filename, newline='') as handle:
+        return [[value.strip() for value in row] for row in csv.reader(handle, skipinitialspace=True)]
+
+
 def _legacy_csv_settings():
     for filename in LEGACY_CONFIG_FILENAMES:
         if not os.path.exists(filename):
             continue
 
-        config = pd.read_csv(filename, skipinitialspace=True)
-        if len(config) == 0:
+        rows = _read_csv_rows(filename)
+        if len(rows) < 2:
             return {}
 
-        row = config.iloc[0]
+        row = dict(zip(rows[0], rows[1]))
         legacy = {}
         for column in ('military_distance', 'max_distance'):
-            if column in config.columns and pd.notna(row.get(column)):
-                legacy['alert_radius_miles'] = float(row.get(column))
+            try:
+                legacy['alert_radius_miles'] = float(row[column])
                 break
-        if 'distribution_list' in config.columns and pd.notna(row.get('distribution_list')):
-            legacy['distribution_list'] = [a.strip() for a in str(row.get('distribution_list')).split('|') if a.strip()]
-        if 'subject' in config.columns and pd.notna(row.get('subject')):
-            legacy['subject'] = str(row.get('subject')).strip()
+            except (KeyError, ValueError):
+                continue
+        if row.get('distribution_list'):
+            legacy['distribution_list'] = [a.strip() for a in row['distribution_list'].split('|') if a.strip()]
+        if row.get('subject'):
+            legacy['subject'] = row['subject']
         return legacy
 
     return {}
@@ -91,10 +111,8 @@ def _legacy_watchlist():
     if not os.path.exists(LEGACY_WATCHLIST_FILENAME):
         return []
 
-    rows = pd.read_csv(LEGACY_WATCHLIST_FILENAME, skipinitialspace=True, dtype=str)
     watchlist = []
-    for _, row in rows.iterrows():
-        values = [str(value).strip() if pd.notna(value) else '' for value in row.values]
+    for values in _read_csv_rows(LEGACY_WATCHLIST_FILENAME)[1:]:
         values += [''] * (4 - len(values))
         try:
             watchlist.append(_as_watch_entry({
@@ -166,9 +184,12 @@ def _as_number(cast, low, high):
             raise ValueError('must be a number')
         try:
             number = cast(value)
-        except (TypeError, ValueError):
+            exact = float(value)
+        except (TypeError, ValueError, OverflowError):
             raise ValueError('must be a number')
-        if cast is int and float(value) != number:
+        if not math.isfinite(exact):
+            raise ValueError('must be a number')
+        if cast is int and exact != number:
             raise ValueError('must be a whole number')
         if not low <= number <= high:
             raise ValueError('must be between ' + str(low) + ' and ' + str(high))
@@ -225,20 +246,32 @@ def _as_security(value):
 
 def _as_watch_match(value):
     """One or more tail numbers, callsigns or hex codes, stored as "N324FX, N268FX"."""
-    parts = value if isinstance(value, list) else re.split(r'[\s,;|]+', str(value or ''))
+    if isinstance(value, list):
+        if len(value) > MAX_MATCH_LENGTH or not all(isinstance(part, str) for part in value):
+            raise ValueError('must be a list of tail numbers, callsigns or hex codes')
+        parts = value
+    else:
+        text = str(value if value is not None else '')
+        if len(text) > MAX_MATCH_LENGTH:
+            raise ValueError('is too long')
+        parts = split_idents(text)
     idents = []
+    seen = set()
     for part in parts:
-        ident = str(part).strip().upper()
+        ident = part.strip().upper()
         if not ident:
             continue
-        if not IDENT_PATTERN.match(ident):
+        if not IDENT_PATTERN.match(ident) or not normalize_ident(ident):
             raise ValueError('"' + ident[:20] + '" is not a tail number, callsign or hex code (letters, digits and dashes only)')
-        if ident not in idents:
-            idents.append(ident)
+        # N-324FX and N324FX are the same aircraft.
+        if normalize_ident(ident) in seen:
+            continue
+        seen.add(normalize_ident(ident))
+        idents.append(ident)
+        if len(idents) > MAX_AIRCRAFT_PER_ENTRY:
+            raise ValueError('can list at most ' + str(MAX_AIRCRAFT_PER_ENTRY) + ' aircraft')
     if not idents:
         raise ValueError('needs a tail number, callsign or hex code')
-    if len(idents) > MAX_AIRCRAFT_PER_ENTRY:
-        raise ValueError('can list at most ' + str(MAX_AIRCRAFT_PER_ENTRY) + ' aircraft')
     return ', '.join(idents)
 
 

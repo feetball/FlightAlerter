@@ -227,8 +227,10 @@ main { padding: 20px; max-width: 1600px; margin: 0 auto; }
 .savebar div { display: flex; gap: 8px; }
 
 /* Log */
-.log { font: 12px/1.6 var(--mono); background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; height: calc(100vh - 210px); min-height: 300px; overflow: auto; }
-.log-line { display: grid; grid-template-columns: 11ch 64px 1fr; gap: 10px; }
+.log { font: 12px/1.6 var(--mono); background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; height: calc(100vh - 210px); min-height: 300px; overflow: auto;
+  /* One grid for all lines, so the time column is as wide as the longest time in this locale. */
+  display: grid; grid-template-columns: max-content max-content 1fr; column-gap: 10px; align-content: start; }
+.log-line { display: contents; }
 .log-time { color: var(--muted); white-space: nowrap; }
 .log-INFO { color: var(--accent); }
 .log-WARNING { color: var(--warn); }
@@ -253,7 +255,7 @@ main { padding: 20px; max-width: 1600px; margin: 0 auto; }
   #status-timing, .topbar .switch-label { display: none; }
   main { padding: 16px; }
   .field-grid { grid-template-columns: 1fr; }
-  .log-line { grid-template-columns: 11ch 1fr; }
+  .log { grid-template-columns: max-content 1fr; }
   .log-level { display: none; }
   .savebar { left: 16px; right: 16px; transform: none; justify-content: space-between; }
 }

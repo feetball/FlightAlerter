@@ -1,13 +1,12 @@
 services:
   flightalerter:
-    # image: flightalerter
     build: .
     restart: unless-stopped
     env_file: .env
+    # Runs as the owner of the data folder, never root. deploy.sh sets these.
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
     ports:
       - "${WEB_PORT:-8095}:${WEB_PORT:-8095}"
-    environment:
-      # Settings, secrets and alert history live in this folder, not in the image's /code.
-      DATA_DIR: /data
     volumes:
-      - .:/data
+      # Settings, secrets and alert history. Set DATA_PATH in .env to keep them outside this folder.
+      - ${DATA_PATH:-./data}:/data

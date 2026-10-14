@@ -1,6 +1,6 @@
+import csv
 import geopy.distance
 import logging
-import pandas as pd
 import requests
 import smtplib
 import ssl
@@ -12,9 +12,9 @@ import re
 from email.mime.text import MIMEText
 from email.header import Header
 from email.utils import formataddr
-from datetime import datetime
 from os.path import exists
 
+import paths
 import secret_store
 import settings as config
 
@@ -32,6 +32,12 @@ SENT_ALERTS_FILENAME = os.path.join(config.DATA_DIR, 'sentAlerts.csv')
 SENT_ALERT_COLUMNS = ['flight_num', 'flight_name', 'sent_time']
 # Guards sentAlerts.csv, which both the check loop and the web UI touch.
 SENT_ALERTS_LOCK = threading.Lock()
+# Aircraft whose last position is older than this are left off the map and out of the counts.
+POSITION_MAX_AGE_SECONDS = 60
+
+# Whole words only: "RAF" must not match "AIRCRAFT", nor "MARINE" a marine services company.
+MILITARY_OPERATOR_PATTERN = re.compile(r'\b(AIR FORCE|USAF|NAVY|MARINE CORPS|USMC|ARMY|COAST GUARD|RAF|LUFTWAFFE)\b')
+MILITARY_CALLSIGN_PATTERN = re.compile(r'^(RCH|MC|PAT|AE|VV|NAVY|REACH|KING|SPAR|GOLD)\d+')
 
 
 def is_military_aircraft(flight):
@@ -42,22 +48,12 @@ def is_military_aircraft(flight):
     if flight.get('military') is True:
         return True
 
-    operator_fields = [
-        str(flight.get('ownOp', '')).upper(),
-        str(flight.get('op', '')).upper(),
-    ]
-    operator_keywords = [
-        'AIR FORCE', 'USAF', 'NAVY', 'MARINE', 'ARMY', 'COAST GUARD',
-        'ROYAL AIR FORCE', 'RAF', 'LUFTWAFFE'
-    ]
-    if any(keyword in operator for operator in operator_fields for keyword in operator_keywords):
-        return True
+    for field in ('ownOp', 'op'):
+        if MILITARY_OPERATOR_PATTERN.search(str(flight.get(field) or '').upper()):
+            return True
 
     callsign = str(flight.get('flight', '')).strip().upper()
-    if re.match(r'^(RCH|MC|PAT|AE|VV|NAVY|REACH|KING|SPAR|GOLD)\d+', callsign):
-        return True
-
-    return False
+    return bool(MILITARY_CALLSIGN_PATTERN.match(callsign))
 
 
 def get_aircraft_db_url(aircraft_data_url):
@@ -155,6 +151,11 @@ def get_aircraft_type(flight):
 
     return 'Unknown'
 
+
+def display_name(flight):
+    return str(flight.get('flight') or '').strip() or flight.get('r') or str(flight.get('hex') or 'unknown').upper()
+
+
 def fetch_aircraft_data(url, timeout_seconds=10, max_attempts=3, retry_delay_seconds=5):
     for attempt in range(1, max_attempts + 1):
         try:
@@ -186,31 +187,38 @@ def smtp_config(settings):
     }
 
 
-def normalize_ident(value):
-    return re.sub(r'[^A-Z0-9]', '', str(value or '').upper())
-
-
-def flight_idents(flight):
-    return {normalize_ident(flight.get(field)) for field in ('flight', 'hex', 'r')} - {''}
-
-
 def watch_idents(entry):
     """The tail numbers, callsigns and hex codes of a watchlist entry; one entry can list several."""
-    return [part for part in re.split(r'[\s,;|]+', entry['match']) if normalize_ident(part)]
+    return [part for part in config.split_idents(entry['match']) if config.normalize_ident(part)]
 
 
-def matched_ident(entry, flight):
-    """Which of the entry's identifiers this aircraft matched, as written in the watchlist."""
-    idents = flight_idents(flight)
-    return next((ident for ident in watch_idents(entry) if normalize_ident(ident) in idents), None)
+def build_watch_index(watchlist):
+    """Maps each normalized identifier to the enabled entries listing it, so matching an aircraft is a
+    lookup rather than a scan of the whole watchlist. Values are (entry order, entry, identifier as written,
+    position in the entry)."""
+    index = {}
+    for order, entry in enumerate(watchlist):
+        if not entry['enabled']:
+            continue
+        for position, ident in enumerate(watch_idents(entry)):
+            index.setdefault(config.normalize_ident(ident), []).append((order, entry, ident, position))
+    return index
 
 
-def watch_entries_for(flight, watchlist):
-    """Watchlist entries matching this aircraft by callsign, hex code or registration (tail number)."""
-    return [entry for entry in watchlist if entry['enabled'] and matched_ident(entry, flight)]
+def match_watchlist(flight, watch_index):
+    """(entries, {entry id: identifier it matched}) for the watchlist entries this aircraft matches by
+    callsign, registration (tail number) or hex code, in watchlist order."""
+    best = {}
+    for field in ('flight', 'r', 'hex'):
+        for order, entry, ident, position in watch_index.get(config.normalize_ident(flight.get(field)), []):
+            # If an entry lists this aircraft twice (say callsign and tail number), name the one listed first.
+            if entry['id'] not in best or position < best[entry['id']][3]:
+                best[entry['id']] = (order, entry, ident, position)
+    matches = sorted(best.values(), key=lambda match: match[0])
+    return [match[1] for match in matches], {match[1]['id']: match[2] for match in matches}
 
 
-def annotate_aircraft(flight, home_coords, db_url, watchlist, db_lookup_radius=None):
+def annotate_aircraft(flight, home_coords, db_url, watch_index, db_lookup_radius=None):
     """Adds distance, database fields, military flag and matching watchlist entries.
 
     With db_lookup_radius, aircraft farther away are classified from the receiver's own fields only,
@@ -219,11 +227,12 @@ def annotate_aircraft(flight, home_coords, db_url, watchlist, db_lookup_radius=N
     if db_lookup_radius is None or flight['distance'] <= db_lookup_radius:
         enrich_flight_with_aircraft_db(flight, db_url)
     flight['military'] = is_military_aircraft(flight)
-    flight['watch_entries'] = watch_entries_for(flight, watchlist)
+    flight['watch_entries'], flight['watch_idents'] = match_watchlist(flight, watch_index)
     return flight
 
 
 def summarize_aircraft(flight):
+    watch_idents_by_entry = flight.get('watch_idents', {})
     return {
         'hex': flight.get('hex'),
         'flight': str(flight.get('flight') or '').strip(),
@@ -237,8 +246,8 @@ def summarize_aircraft(flight):
         'squawk': flight.get('squawk'),
         'distance': flight.get('distance'),
         'military': bool(flight.get('military')),
-        'watched': [{'id': entry['id'], 'label': entry.get('label') or matched_ident(entry, flight),
-                     'ident': matched_ident(entry, flight), 'radius_miles': entry['radius_miles']}
+        'watched': [{'id': entry['id'], 'label': entry.get('label') or watch_idents_by_entry.get(entry['id']),
+                     'ident': watch_idents_by_entry.get(entry['id']), 'radius_miles': entry['radius_miles']}
                     for entry in flight.get('watch_entries', [])],
         'seen': flight.get('seen'),
     }
@@ -253,26 +262,62 @@ def watch_label(entry):
     return idents[0] + ' +' + str(len(idents) - 1) + ' more'
 
 
-def watch_subject(entry, flights):
-    """The entry's subject (or the default one) with <aircraft> and <radius> filled in."""
-    template = entry['subject'] or ((entry.get('label') or '<aircraft>') + ' is within <radius> mi')
-    idents = []
+def fill_placeholders(template, aircraft_names, radius_miles):
+    """A user-written subject with <aircraft> and <radius> filled in."""
+    text = re.sub(r'<\s*aircraft\s*>', lambda _: ', '.join(aircraft_names), template, flags=re.IGNORECASE)
+    return re.sub(r'<\s*radius\s*>', lambda _: '%g' % radius_miles, text, flags=re.IGNORECASE)
+
+
+def email_text(entry, flights, settings):
+    """(subject, first line) of the email about these aircraft. entry is None for the military email."""
+    if entry is None:
+        names = [display_name(flight) for flight in flights]
+        return (fill_placeholders(settings['subject'], names, settings['alert_radius_miles']),
+                'Military aircraft within range')
+
+    # Name the aircraft actually in range, not every aircraft the entry lists.
+    names = []
     for flight in flights:
-        ident = matched_ident(entry, flight)
-        if ident and ident not in idents:
-            idents.append(ident)
-    template = re.sub(r'<\s*aircraft\s*>', lambda _: ', '.join(idents), template, flags=re.IGNORECASE)
-    return re.sub(r'<\s*radius\s*>', lambda _: '%g' % entry['radius_miles'], template, flags=re.IGNORECASE)
+        ident = flight.get('watch_idents', {}).get(entry['id']) or display_name(flight)
+        if ident not in names:
+            names.append(ident)
+    who = entry.get('label') or ', '.join(names)
+    if entry['subject']:
+        subject = fill_placeholders(entry['subject'], names, entry['radius_miles'])
+    else:
+        subject = who + ' is within ' + '%g' % entry['radius_miles'] + ' mi'
+    return subject, who + ' within range'
 
 
 def load_sent_alerts():
-    if exists(SENT_ALERTS_FILENAME):
-        return pd.read_csv(SENT_ALERTS_FILENAME, dtype={'flight_num': str, 'flight_name': str})
-    return pd.DataFrame(columns=SENT_ALERT_COLUMNS)
+    """Sent alert rows, oldest first. Unreadable lines are skipped so one bad line can't stop every check."""
+    if not exists(SENT_ALERTS_FILENAME):
+        return []
+    rows = []
+    with open(SENT_ALERTS_FILENAME, newline='') as handle:
+        for row in csv.DictReader(handle):
+            try:
+                rows.append({'flight_num': row['flight_num'].strip().lower(),
+                             'flight_name': (row.get('flight_name') or '').strip(),
+                             'sent_time': float(row['sent_time'])})
+            except (AttributeError, KeyError, TypeError, ValueError):
+                logger.warning('Skipping unreadable line in sentAlerts.csv: ' + repr(row))
+    return rows
 
 
 def save_sent_alerts(sent_alerts):
-    sent_alerts.to_csv(SENT_ALERTS_FILENAME, index=False)
+    # Write a new file and swap it in, so a crash mid-write can't leave the history empty or cut short.
+    temp_filename = SENT_ALERTS_FILENAME + '.tmp'
+    with open(temp_filename, 'w', newline='') as handle:
+        writer = csv.DictWriter(handle, fieldnames=SENT_ALERT_COLUMNS)
+        writer.writeheader()
+        writer.writerows(sent_alerts)
+    os.replace(temp_filename, SENT_ALERTS_FILENAME)
+
+
+def last_alert_time():
+    with SENT_ALERTS_LOCK:
+        return max((row['sent_time'] for row in load_sent_alerts()), default=None)
 
 
 def alert_key(flight, prefix=''):
@@ -283,19 +328,16 @@ def select_eligible_flights(flights, sent_alerts, settings, current_timestamp, k
     eligible_flights = []
     for flight_info in flights:
         aircraft_registration = alert_key(flight_info, key_prefix)
-        past_alerts = sent_alerts.loc[sent_alerts['flight_num'] == aircraft_registration]
+        past_alerts = [row['sent_time'] for row in sent_alerts if row['flight_num'] == aircraft_registration]
 
         if len(past_alerts) >= settings['max_alerts_per_aircraft']:
             continue
 
         # Repeat notifications must wait realert_minutes after the previous one.
-        if len(past_alerts) > 0:
-            elapsed_minutes = (current_timestamp - past_alerts['sent_time'].max()) / 60
-            if elapsed_minutes <= settings['realert_minutes']:
-                continue
+        if past_alerts and (current_timestamp - max(past_alerts)) / 60 <= settings['realert_minutes']:
+            continue
 
-        flight_info = dict(flight_info, aircraft_registration=aircraft_registration)
-        eligible_flights.append(flight_info)
+        eligible_flights.append(dict(flight_info, aircraft_registration=aircraft_registration))
     return eligible_flights
 
 
@@ -318,6 +360,9 @@ def run_check(settings):
     if not settings['aircraft_data_url']:
         result['error'] = 'Receiver URL is not set'
         return result
+    if settings['home_lat'] == 0 and settings['home_lon'] == 0:
+        result['error'] = 'Home location is not set'
+        return result
 
     json_dump = fetch_aircraft_data(settings['aircraft_data_url'])
     if json_dump is None:
@@ -326,6 +371,7 @@ def run_check(settings):
 
     home_coords = (settings['home_lat'], settings['home_lon'])
     aircraft_db_url = get_aircraft_db_url(settings['aircraft_data_url'])
+    watch_index = build_watch_index(settings['watchlist'])
     aircraft = json_dump.get('aircraft', [])
     result['aircraft_total'] = len(aircraft)
 
@@ -336,49 +382,66 @@ def run_check(settings):
     # (entry, [flights]) for each watchlist entry with a matching aircraft inside its own radius
     watch_hits = {}
     for flight in aircraft:
-        if flight.get('seen', 999) >= settings['max_seen_seconds']:
-            continue
         if 'lat' not in flight or 'lon' not in flight:
+            continue
+        position_age = flight.get('seen_pos', flight.get('seen', 999))
+        if position_age > POSITION_MAX_AGE_SECONDS:
             continue
         result['aircraft_positioned'] += 1
 
-        annotate_aircraft(flight, home_coords, aircraft_db_url, settings['watchlist'], lookup_radius)
+        annotate_aircraft(flight, home_coords, aircraft_db_url, watch_index, lookup_radius)
+        if flight['military']:
+            result['military_seen'].append(flight)
+
+        # Only alert on a recent position: an aircraft moves miles in a minute.
+        if position_age >= settings['max_seen_seconds']:
+            continue
+        in_watch_range = False
         for entry in flight['watch_entries']:
             if flight['distance'] <= entry['radius_miles']:
                 watch_hits.setdefault(entry['id'], (entry, []))[1].append(flight)
-                result['watch_in_range'].append(flight)
-
-        if flight['military']:
-            result['military_seen'].append(flight)
-            if flight['distance'] <= settings['alert_radius_miles']:
-                result['military_in_range'].append(flight)
+                in_watch_range = True
+        if in_watch_range:
+            result['watch_in_range'].append(flight)
+        if flight['military'] and flight['distance'] <= settings['alert_radius_miles']:
+            result['military_in_range'].append(flight)
 
     # Each batch is one email: all military aircraft together (no entry), then one per watchlist entry.
-    batches = [(None, settings['distribution_list'], 'Military aircraft within range', '', result['military_in_range'])]
+    batches = [(None, settings['distribution_list'], '', result['military_in_range'])]
     for entry, flights in watch_hits.values():
-        batches.append((entry, entry['recipients'] or settings['distribution_list'],
-                        watch_label(entry) + ' within range', 'watch:' + entry['id'] + ':', flights))
+        batches.append((entry, entry['recipients'] or settings['distribution_list'], 'watch:' + entry['id'] + ':', flights))
 
+    email_errors = []
     with SENT_ALERTS_LOCK:
         sent_alerts = load_sent_alerts()
-        for entry, recipients, heading, key_prefix, flights in batches:
+        for entry, recipients, key_prefix, flights in batches:
             eligible_flights = select_eligible_flights(flights, sent_alerts, settings, time.time(), key_prefix)
             if not eligible_flights:
                 continue
-            # A watchlist subject names the aircraft actually being emailed about.
-            subject = watch_subject(entry, eligible_flights) if entry else settings['subject']
-            result['notified'].extend(eligible_flights)
+            subject, heading = email_text(entry, eligible_flights, settings)
             if not settings['send_emails']:
                 # Not logged as sent, so they alert once emails are switched back on.
                 logger.info('Emails are off; would have sent "' + subject + '" about ' + str(len(eligible_flights)) + ' aircraft.')
+                result['notified'].extend(eligible_flights)
                 continue
-            send_email(eligible_flights, subject, recipients, heading, settings)
+            try:
+                send_email(eligible_flights, subject, recipients, heading, settings)
+            except Exception as exc:
+                # Carry on with the other emails. Nothing is logged as sent, so this one is retried next check.
+                message = str(exc) or repr(exc)
+                logger.error('Could not send "' + subject + '": ' + message)
+                email_errors.append(message)
+                continue
+            result['notified'].extend(eligible_flights)
             sent_alerts = write_alert_log(eligible_flights, sent_alerts)
             save_sent_alerts(sent_alerts)
             result['emails_sent'] += 1
 
     result['email_sent'] = result['emails_sent'] > 0
-    if not result['notified']:
+    if email_errors:
+        result['error'] = ('Could not send ' + str(len(email_errors)) + ' email' + ('s' if len(email_errors) > 1 else '')
+                           + ': ' + email_errors[0])
+    if not result['notified'] and not email_errors:
         logger.info('Checked ' + str(result['aircraft_positioned']) + ' aircraft; '
                     + str(len(result['military_in_range'])) + ' military and '
                     + str(len(result['watch_in_range'])) + ' watched in range, none due a notification.')
@@ -399,14 +462,14 @@ def send_message(subject, message_text, recipients, smtp):
     context = ssl.create_default_context()
     if smtp['security'] == 'starttls':
         server = smtplib.SMTP(smtp['hostname'], smtp['port'], timeout=30)
-        server.starttls(context=context)
     else:
         server = smtplib.SMTP_SSL(smtp['hostname'], smtp['port'], timeout=30, context=context)
-    try:
+    # The with block always closes the connection, and a failing QUIT can't hide the real error.
+    with server:
+        if smtp['security'] == 'starttls':
+            server.starttls(context=context)
         server.login(smtp['username'], smtp['password'])
         server.sendmail(smtp['username'], recipients, msg.as_string())
-    finally:
-        server.quit()
 
 
 def send_email(flights, subject, recipients, heading, settings):
@@ -425,7 +488,7 @@ def send_email(flights, subject, recipients, heading, settings):
         message_lines.append('Hex: ' + str(flight_info.get('hex', 'unknown')))
         message_lines.append('All Stats:')
         for key in sorted(flight_info.keys()):
-            if key in ('watch_entries', 'aircraft_registration'):
+            if key in ('watch_entries', 'watch_idents', 'aircraft_registration'):
                 continue
             message_lines.append('  ' + str(key) + ': ' + str(flight_info.get(key)))
         message_lines.append('')
@@ -443,27 +506,20 @@ def send_test_email(settings):
 
 
 def write_alert_log(flights, sent_alerts):
-    timestamp = datetime.timestamp(datetime.now())
-
-    new_rows = []
-    for flight_info in flights:
-        new_rows.append({
-            'flight_num': flight_info.get('aircraft_registration', 'unknown'),
-            'flight_name': str(flight_info.get('flight') or '').strip() or flight_info.get('r') or 'unknown',
-            'sent_time': timestamp
-        })
-
-    if new_rows:
-        sent_alerts = pd.concat([sent_alerts, pd.DataFrame(new_rows)], ignore_index=True)
-
-    return sent_alerts
+    timestamp = time.time()
+    return sent_alerts + [{
+        'flight_num': flight_info.get('aircraft_registration', 'unknown'),
+        'flight_name': str(flight_info.get('flight') or '').strip() or flight_info.get('r') or 'unknown',
+        'sent_time': timestamp,
+    } for flight_info in flights]
 
 
 def main():
     """Run a single check from the command line. The web app (app.py) runs this on a loop."""
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+    paths.prepare_data_dir()
     result = run_check(config.load_settings())
-    if not result['ok']:
+    if result['error']:
         logger.error(result['error'])
 
 

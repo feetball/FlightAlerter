@@ -79,12 +79,18 @@ With Docker:
 run yourself. Compose needs a `.env` file to exist, even an empty one; `deploy.sh`
 creates it if it is missing.
 
-The container runs the code built into the image. This folder is mounted into the
-container at `/data`, where settings, secrets and alert history are kept, so they
-survive rebuilds.
+The container runs the code built into the image. Settings, secrets and alert history
+are kept in the `data/` folder here (mounted into the container at `/data`), so they
+survive rebuilds. The service runs as the owner of `data/`, never as root: if root owns
+it, `deploy.sh` hands it to user ID 1000. Older versions kept these files in this folder
+itself; `deploy.sh` moves them into `data/`. If you run `docker compose` yourself, make
+sure `data/` exists and is owned by user 1000.
 
-Without Docker, run it from this folder (settings and history are kept in the current
-directory, or in `DATA_DIR` if you set it):
+`data/` is ignored by git, so `git clean -x` deletes it. Set `DATA_PATH` in `.env` to
+keep it somewhere else.
+
+Without Docker, run it from this folder (settings and history are kept in `data/` next
+to the code, or in `DATA_DIR` if you set it):
 
 ```sh
 python3 -m venv venv
@@ -105,11 +111,12 @@ Docker Compose reads `.env` from this folder. All of it is optional:
 | `WEB_PORT` | Dashboard port (default 8095). The only way to change it. |
 | `WEB_HTTPS` | Set to `1` when the dashboard is served over HTTPS by a reverse proxy, so the login cookie is only sent over HTTPS. |
 | `WEB_PASSWORD` | Initial admin password, used instead of the setup code. Ignored once a password exists. |
+| `DATA_PATH` | Folder for settings, secrets and alert history (default `./data`). |
 | `SMTP_HOSTNAME`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM_NAME`, `HOME_LAT`, `HOME_LON`, `AIRCRAFT_DATA_URL` | Pre-fill settings on the very first start only. After that, change them in the dashboard. |
 
 `.env.example` lists them all. Keep the file private (`chmod 600 .env`). Once the
 service has started, delete `SMTP_PASSWORD` and `WEB_PASSWORD` from it: they have been
-saved in `secrets.json` and are no longer read.
+saved in `data/secrets.json` and are no longer read.
 
 ## Using the dashboard
 
@@ -118,14 +125,16 @@ Open `http://<host>:8095` and sign in.
 ### Top bar
 
 - **Status pill**: *Monitoring* (all good), *Checking…*, *Paused*, *Error*,
-  *Starting…* (no check yet) or *Offline* (the browser lost contact with the service).
-  Next to it: when the last check ran and when the next one is due.
+  *Starting…* (no check yet), *Stalled* (checks have stopped running) or *Offline* (the
+  browser lost contact with the service). Next to it: when the last check ran and when
+  the next one is due.
 - **Monitoring** switch: pauses or resumes the regular checks straight away, without
   touching other settings. While paused, no scheduled checks run and no email is sent.
 - **Run check**: runs a check now, even while paused. Any email that is due is sent, so
   this is a quick end-to-end test once the settings are filled in.
-- A red banner under the bar shows why the last check failed, for example an
-  unreachable receiver.
+- A red banner under the bar shows what went wrong in the last check, for example an
+  unreachable receiver or an email that could not be sent. One failed email doesn't stop
+  the others; it is tried again at the next check.
 
 ### Dashboard
 
@@ -170,7 +179,7 @@ away when monitoring is on.
 - **Alerting**: monitoring on/off (same as the top-bar switch), **Send emails** (turn
   off to watch the dashboard without sending mail), the military alert radius, default
   recipients (type an address and press Enter or comma; click × to remove one) and the
-  military email subject.
+  military email subject (`<aircraft>` and `<radius>` are filled in here too).
 - **Location & receiver**: the receiver's `aircraft.json` URL. **Test** checks that it
   answers and shows how many aircraft it reports. **Use receiver's location** fills in
   home latitude and longitude from the receiver, if it publishes them. Save afterwards.
@@ -184,7 +193,7 @@ away when monitoring is on.
   "*nickname* is within *N* mi", or "*aircraft* is within *N* mi" without a nickname.
   Untick an entry to pause it without deleting it.
 - **Timing & limits**: how often to check, emails per aircraft, the wait between repeat
-  emails, and how long since an aircraft was last heard before it is ignored.
+  emails, and how old an aircraft's position can be before it no longer triggers alerts.
 - **Email server**: SMTP host, encryption (SSL/TLS, usually port 465, or STARTTLS,
   usually 587), port, username (also the From address), password and From name. The
   password is never shown; leave the field blank to keep the saved one. **Send test
@@ -204,6 +213,9 @@ cleared on restart; `docker compose logs flightalerter` has the full history.
 | You see | What to do |
 |---------|------------|
 | *Receiver URL is not set* / *Could not reach the receiver* | Settings → Location & receiver: fix the URL, then **Test**. |
+| *Home location is not set* | Settings → Location & receiver: enter your latitude and longitude, or **Use receiver's location**, then save. |
+| *Could not send 1 email: …* | Check Settings → Email server and the recipients, then **Send test email**. |
+| *Stalled* | Checks have stopped running. Restart with `./deploy.sh` and check `docker compose logs flightalerter` for the error. |
 | Last email: *Not set up* | Fill in Settings → Email server, save, then **Send test email**. |
 | An aircraft in range but no email | Check the Alerts page: it may have hit its email limit or still be in the wait between repeats. **Reset** it there. Also check that **Send emails** is on. |
 | Map tiles say *Access blocked* | Hard-refresh the page (Ctrl+Shift+R). OpenStreetMap refuses some requests; see its tile usage policy. |
@@ -211,7 +223,7 @@ cleared on restart; `docker compose logs flightalerter` has the full history.
 
 ## Files
 
-Kept in this folder (`/data` inside the container):
+Kept in `data/` (`/data` inside the container):
 
 | File               | Contents                                                    | In git? |
 |--------------------|-------------------------------------------------------------|---------|
@@ -221,8 +233,8 @@ Kept in this folder (`/data` inside the container):
 | `.env`             | Optional, see [above](#optional-env-file)                   | No      |
 
 `militaryFlights.csv` and `monitoredFlights.csv` are config files from older versions.
-If they exist when `settings.json` doesn't, their values are imported into the settings
-and the watchlist. After that they are ignored.
+If they are in `data/` when `settings.json` isn't, their values are imported into the
+settings and the watchlist. After that they are ignored.
 
 ## Security
 
@@ -232,7 +244,8 @@ and the watchlist. After that they are ignored.
 - **Changing the password** signs out every other browser. Signing out only clears the
   cookie in that browser, so change the password if you think a session was stolen.
 - **Wrong passwords.** After 5 wrong attempts (login, setup code or current password),
-  that address is refused for 15 minutes. Behind a reverse proxy every visitor shares
+  that address is refused for 15 minutes. Attempts are counted as they arrive, so sending
+  many at once doesn't get around the limit. Behind a reverse proxy every visitor shares
   the proxy's address, so they are locked out together.
 - **Forged requests.** Every request that changes something must carry a custom header,
   which blocks cross-site request forgery. Pages are sent with a strict Content Security
@@ -242,11 +255,14 @@ and the watchlist. After that they are ignored.
   can read.
 - **Certificates.** Email is sent over TLS, and the mail server's certificate is
   verified.
+- **Container.** The service runs as an unprivileged user and can only write to `data/`.
+  The map library is loaded from a CDN with an integrity hash, so a tampered copy is
+  refused.
 - **HTTPS.** The dashboard itself speaks plain HTTP. Keep it on your LAN. To reach it
   from outside, put it behind a reverse proxy with HTTPS and set `WEB_HTTPS=1` so the
   session cookie is only sent over HTTPS.
 
-**Forgot the admin password?** In `secrets.json`, change the value of
+**Forgot the admin password?** In `data/secrets.json`, change the value of
 `admin_password_hash` to `""` and restart (`docker compose restart`). A new setup code
 is printed in the log. If `WEB_PASSWORD` is still set in `.env`, it becomes the password
 instead.
@@ -257,8 +273,9 @@ An aircraft counts as military if any of these is true:
 
 - The receiver database marks it military (`dbFlags` lowest bit set, or
   `military: true`)
-- Its operator field contains words such as `AIR FORCE`, `USAF`, `NAVY`, `ARMY` or
-  `COAST GUARD`
+- Its operator field contains one of the words `AIR FORCE`, `USAF`, `NAVY`,
+  `MARINE CORPS`, `USMC`, `ARMY`, `COAST GUARD`, `RAF` or `LUFTWAFFE` (as whole words, so
+  `AIRCRAFT GUARANTY CORP` is not mistaken for the RAF)
 - Its callsign is a known military prefix followed by digits (`RCH`, `REACH`, `PAT`,
   `SPAR`, and others)
 
@@ -266,8 +283,8 @@ To keep checks fast, the database lookup is skipped for aircraft outside every a
 radius (they can't trigger an email anyway), so those are classified from the
 receiver's own data only. The dashboard map always looks them up.
 
-Aircraft not heard from in the last 10 seconds (configurable), or with no position,
-are skipped by the check.
+Only aircraft whose position is less than 10 seconds old (configurable) can trigger an
+email; the map and counts include positions up to a minute old.
 
 ## Alert limits
 
@@ -278,3 +295,17 @@ reset it on the **Alerts** page.
 
 While **Send emails** is off, nothing is recorded, so aircraft still in range alert
 once emails are turned back on.
+
+## Development
+
+The tests use only Python's standard library. Run them in the image:
+
+```sh
+docker compose build
+docker compose run --rm --no-deps flightalerter python -m unittest discover -s tests -t .
+```
+
+or, without Docker, `venv/bin/python -m unittest discover -s tests -t .` from this folder.
+
+Dependencies are pinned in `requirements.txt`. To upgrade, change the versions there,
+rebuild and run the tests.
