@@ -87,7 +87,7 @@ function showTab(name) {
   try { localStorage.setItem('flightAlerter.tab', name); } catch (_) { /* storage blocked */ }
   if (name === 'dashboard') { map.invalidateSize(); refreshAircraft(); }
   if (name === 'alerts') refreshAlerts();
-  if (name === 'settings') loadSettings();
+  if (name === 'settings') { loadSettings(); fitAircraftBoxes(); }
   if (name === 'log') refreshLog();
 }
 
@@ -211,8 +211,13 @@ $('#military-only').addEventListener('change', (event) => {
 
 // ---------- live aircraft ----------
 
+// One request at a time: a call made while one is in flight runs once it finishes, instead of piling up.
+const aircraftLoad = { busy: false, again: false };
+
 async function refreshAircraft() {
   if (ui.tab !== 'dashboard') return;
+  if (aircraftLoad.busy) { aircraftLoad.again = true; return; }
+  aircraftLoad.busy = true;
   try {
     const payload = await api('/api/aircraft');
     $('#map-error').hidden = true;
@@ -224,6 +229,9 @@ async function refreshAircraft() {
   } catch (error) {
     $('#map-error').textContent = error.message;
     $('#map-error').hidden = false;
+  } finally {
+    aircraftLoad.busy = false;
+    if (aircraftLoad.again) { aircraftLoad.again = false; refreshAircraft(); }
   }
 }
 
@@ -329,15 +337,19 @@ function renderStatus() {
   const now = Date.now() / 1000;
   const result = s.last_result;
 
+  // The next check is well overdue and none is running: the scheduler has stopped.
+  const stalled = s.enabled && !s.running && s.next_run_at && now - s.next_run_at > 30;
+
   if (s.running) setPill('warn pill-busy', 'Checking…');
   else if (!s.enabled) setPill('muted', 'Paused');
-  else if (result && !result.ok) setPill('bad', 'Error');
+  else if (stalled) setPill('bad', 'Stalled');
+  else if (result && result.error) setPill('bad', 'Error');
   else if (result) setPill('good', 'Monitoring');
   else setPill('muted', 'Starting…');
 
   let timing = '';
   if (result) timing = 'Checked ' + ago(result.finished_at, now);
-  if (s.enabled && s.next_run_at && !s.running) {
+  if (s.enabled && s.next_run_at && !s.running && !stalled) {
     const next = Math.max(0, Math.round(s.next_run_at - now));
     timing += (timing ? ' · ' : '') + 'next in ' + next + 's';
   }
@@ -346,8 +358,11 @@ function renderStatus() {
   const quick = $('#quick-enabled');
   if (document.activeElement !== quick) quick.checked = s.enabled;
 
-  if (result && !result.ok) {
-    $('#banner').textContent = 'Last check failed: ' + result.error;
+  if (stalled) {
+    $('#banner').textContent = 'Checks have stopped running. Restart the service (./deploy.sh) and look at its log.';
+    $('#banner').hidden = false;
+  } else if (result && result.error) {
+    $('#banner').textContent = (result.ok ? 'Last check: ' : 'Last check failed: ') + result.error;
     $('#banner').hidden = false;
   }
 
@@ -359,7 +374,7 @@ function renderStatus() {
     $('#stat-email-sub').textContent = 'add the email server in Settings';
   } else {
     $('#stat-email').textContent = s.last_email_at ? ago(s.last_email_at, now) : 'None yet';
-    $('#stat-email-sub').textContent = s.last_email_at ? dateTime(s.last_email_at) : 'since the service started';
+    $('#stat-email-sub').textContent = s.last_email_at ? dateTime(s.last_email_at) : 'no alert emails sent so far';
   }
 }
 
@@ -369,7 +384,7 @@ $('#run-now').addEventListener('click', async () => {
   setPill('warn pill-busy', 'Checking…');
   try {
     const result = await api('/api/run', { method: 'POST' });
-    if (!result.ok) toast('Check failed: ' + result.error, 'bad');
+    if (result.error) toast((result.ok ? '' : 'Check failed: ') + result.error, 'bad');
     else if (result.email_sent) toast('Sent ' + result.emails_sent + ' email(s) about ' + result.notified.length + ' aircraft.', 'good');
     else toast('Check complete: ' + result.military_in_range.length + ' military and ' + result.watch_in_range.length + ' watched aircraft in range.', 'good');
   } catch (error) {
@@ -595,11 +610,13 @@ function watchRow(entry) {
 
 // The aircraft box wraps a long list onto more lines instead of scrolling it out of sight.
 function fitAircraftBox(box) {
+  if (!box.offsetParent) return;  // hidden (Settings not shown): there's nothing to measure
   box.style.height = 'auto';
-  if (box.scrollHeight) box.style.height = (box.scrollHeight + box.offsetHeight - box.clientHeight) + 'px';
+  box.style.height = (box.scrollHeight + box.offsetHeight - box.clientHeight) + 'px';
 }
 
 function fitAircraftBoxes() {
+  if (ui.tab !== 'settings') return;
   document.querySelectorAll('#watch-rows [data-watch="match"]').forEach(fitAircraftBox);
 }
 
@@ -650,10 +667,15 @@ $('#watch-rows').addEventListener('input', (event) => {
   if (event.target.dataset.watch === 'match') fitAircraftBox(event.target);
 });
 $('#watch-rows').addEventListener('keydown', (event) => {
-  // Enter saves, as it does in the other fields, rather than starting a new line.
-  if (event.target.dataset.watch === 'match' && event.key === 'Enter') { event.preventDefault(); form.requestSubmit(); }
+  // Enter saves, as it does in the other fields, rather than starting a new line. Clicking the button
+  // (rather than requestSubmit) does nothing while a save is already in progress.
+  if (event.target.dataset.watch === 'match' && event.key === 'Enter') { event.preventDefault(); $('#save').click(); }
 });
-window.addEventListener('resize', fitAircraftBoxes);
+let resizeFrame = 0;
+window.addEventListener('resize', () => {
+  cancelAnimationFrame(resizeFrame);
+  resizeFrame = requestAnimationFrame(fitAircraftBoxes);
+});
 
 function clearErrors() {
   form.querySelectorAll('[data-error]').forEach((el) => { el.textContent = ''; });
@@ -813,10 +835,29 @@ try {
   if (savedTab && document.getElementById('tab-' + savedTab)) ui.tab = savedTab;
 } catch (_) { /* storage blocked */ }
 
+// Runs fn every ms, counted from when the previous run finished so slow responses can't pile up.
+// Skipped while the page is in a background tab.
+function poll(fn, ms) {
+  const tick = async () => {
+    try {
+      if (!document.hidden) await fn();
+    } finally {
+      setTimeout(tick, ms);
+    }
+  };
+  setTimeout(tick, ms);
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  refreshStatus();
+  refreshAircraft();
+});
+
 showTab(ui.tab);
 refreshStatus();
-setInterval(refreshStatus, 5000);
 setInterval(renderStatus, 1000);
-setInterval(refreshAircraft, 3000);
-setInterval(refreshLog, 3000);
-setInterval(refreshAlerts, 30000);
+poll(refreshStatus, 5000);
+poll(refreshAircraft, 3000);
+poll(refreshLog, 3000);
+poll(refreshAlerts, 30000);

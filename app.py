@@ -12,6 +12,7 @@ from flask import Flask, jsonify, redirect, request, send_from_directory, sessio
 from waitress import serve
 
 import flightAlerter as alerter
+import paths
 import secret_store
 import settings as config
 
@@ -53,8 +54,11 @@ state_lock = threading.Lock()
 run_lock = threading.Lock()
 wake_scheduler = threading.Event()
 
-live_cache = {'fetched_at': 0, 'key': None, 'payload': None}
+live_cache = {'fetched_at': 0, 'key': None, 'response': None}
 live_cache_lock = threading.Lock()
+# Only one request builds the live payload at a time; others wait for it and reuse it.
+live_build_lock = threading.Lock()
+LIVE_CACHE_SECONDS = 2
 
 login_failures = {}
 login_failures_lock = threading.Lock()
@@ -109,20 +113,26 @@ def client_address():
     return request.remote_addr or 'unknown'
 
 
-def login_locked_for():
-    """Seconds until this client may try again, or 0."""
+def begin_login_attempt():
+    """Counts an attempt before the password is checked, so a burst of parallel requests can't slip past
+    the limit. Returns seconds until this client may try again, or 0 to go ahead. A correct password
+    clears the count (clear_login_failures)."""
     now = time.time()
+    address = client_address()
     with login_failures_lock:
-        attempts = [t for t in login_failures.get(client_address(), []) if now - t < LOGIN_LOCKOUT_SECONDS]
-        login_failures[client_address()] = attempts
+        attempts = [t for t in login_failures.get(address, []) if now - t < LOGIN_LOCKOUT_SECONDS]
         if len(attempts) >= MAX_LOGIN_FAILURES:
+            login_failures[address] = attempts
             return int(LOGIN_LOCKOUT_SECONDS - (now - attempts[0])) + 1
+        login_failures[address] = attempts + [now]
+        if len(login_failures) > 1000:
+            # Forget addresses with no recent attempts so the table can't grow without limit.
+            for stale in [key for key, times in login_failures.items() if now - times[-1] >= LOGIN_LOCKOUT_SECONDS]:
+                del login_failures[stale]
     return 0
 
 
-def record_login_failure():
-    with login_failures_lock:
-        login_failures.setdefault(client_address(), []).append(time.time())
+def log_login_failure():
     logger.warning('Failed login attempt from ' + client_address())
 
 
@@ -191,22 +201,22 @@ def api_auth_status():
 def api_auth_setup():
     if secret_store.admin_configured():
         return jsonify({'error': 'An admin password is already set.'}), 409
-    locked = login_locked_for()
+    locked = begin_login_attempt()
     if locked:
         return too_many_attempts(locked)
 
     body = request.get_json(silent=True) or {}
     code = str(body.get('code', '')).strip().upper()
     if not setup_code['value'] or not hmac.compare_digest(code.encode(), setup_code['value'].encode()):
-        record_login_failure()
+        log_login_failure()
         return jsonify({'error': 'That setup code is not right. Check the server log.'}), 403
+    clear_login_failures()
     problem = password_problem(body.get('password'))
     if problem:
         return jsonify({'error': problem}), 400
 
     version = secret_store.set_admin_password(body['password'])
     setup_code['value'] = None
-    clear_login_failures()
     start_session(version)
     logger.info('Admin password created')
     return jsonify({'ok': True})
@@ -214,13 +224,13 @@ def api_auth_setup():
 
 @app.route('/api/auth/login', methods=['POST'])
 def api_auth_login():
-    locked = login_locked_for()
+    locked = begin_login_attempt()
     if locked:
         return too_many_attempts(locked)
 
     body = request.get_json(silent=True) or {}
     if not secret_store.verify_admin_password(str(body.get('password', ''))):
-        record_login_failure()
+        log_login_failure()
         return jsonify({'error': 'Wrong password.'}), 403
 
     clear_login_failures()
@@ -237,14 +247,15 @@ def api_auth_logout():
 
 @app.route('/api/auth/password', methods=['POST'])
 def api_auth_password():
-    locked = login_locked_for()
+    locked = begin_login_attempt()
     if locked:
         return too_many_attempts(locked)
 
     body = request.get_json(silent=True) or {}
     if not secret_store.verify_admin_password(str(body.get('current', ''))):
-        record_login_failure()
+        log_login_failure()
         return jsonify({'error': 'Current password is wrong.'}), 403
+    clear_login_failures()
     problem = password_problem(body.get('new'))
     if problem:
         return jsonify({'error': problem}), 400
@@ -297,12 +308,18 @@ def run_once():
 
 def scheduler_loop():
     while True:
-        settings = config.load_settings()
-        if settings['enabled']:
-            run_once()
-        interval = settings['check_interval_seconds']
+        try:
+            settings = config.load_settings()
+            if settings['enabled']:
+                run_once()
+            interval = float(settings['check_interval_seconds'])
+            enabled = settings['enabled']
+        except Exception:
+            # Never let one bad cycle (say, a hand-edited settings.json) stop monitoring for good.
+            logger.exception('Scheduler error; trying again in a minute')
+            interval, enabled = 60, True
         with state_lock:
-            state['next_run_at'] = time.time() + interval if settings['enabled'] else None
+            state['next_run_at'] = time.time() + interval if enabled else None
         # A settings change or "pause/resume" wakes the loop early.
         wake_scheduler.wait(interval)
         wake_scheduler.clear()
@@ -335,30 +352,52 @@ def api_status():
         })
 
 
+def cached_live_response(cache_key):
+    with live_cache_lock:
+        if live_cache['key'] == cache_key and time.time() - live_cache['fetched_at'] < LIVE_CACHE_SECONDS:
+            return live_cache['response']
+    return None
+
+
 @app.route('/api/aircraft')
 def api_aircraft():
     """Live positions for the map. Cached briefly so several open tabs don't hammer the receiver."""
     settings = config.load_settings()
-    url = settings['aircraft_data_url']
-    cache_key = repr((url, settings['home_lat'], settings['home_lon'], settings['watchlist'], settings['alert_radius_miles']))
-    with live_cache_lock:
-        if live_cache['key'] == cache_key and time.time() - live_cache['fetched_at'] < 2:
-            return jsonify(live_cache['payload'])
+    cache_key = repr((settings['aircraft_data_url'], settings['home_lat'], settings['home_lon'], settings['watchlist'],
+                      settings['alert_radius_miles']))
+    response = cached_live_response(cache_key)
+    if response is None:
+        # The first build after a restart can be slow (database lookups); polls arriving meanwhile wait
+        # for it here instead of each repeating the same work.
+        with live_build_lock:
+            response = cached_live_response(cache_key)
+            if response is None:
+                response = build_live_response(settings)
+                with live_cache_lock:
+                    live_cache.update({'fetched_at': time.time(), 'key': cache_key, 'response': response})
+    payload, status = response
+    return jsonify(payload), status
 
+
+def build_live_response(settings):
+    """(payload, HTTP status) for /api/aircraft."""
+    url = settings['aircraft_data_url']
     try:
         response = requests.get(url, timeout=5)
         response.raise_for_status()
         data = response.json()
     except (requests.exceptions.RequestException, ValueError) as exc:
-        return jsonify({'error': 'Could not reach the receiver: ' + str(exc)}), 502
+        return {'error': 'Could not reach the receiver: ' + str(exc)}, 502
 
     home_coords = (settings['home_lat'], settings['home_lon'])
     db_url = alerter.get_aircraft_db_url(url)
+    watch_index = alerter.build_watch_index(settings['watchlist'])
     aircraft = []
     for flight in data.get('aircraft', []):
-        if 'lat' not in flight or 'lon' not in flight or flight.get('seen_pos', flight.get('seen', 999)) > 60:
+        if ('lat' not in flight or 'lon' not in flight
+                or flight.get('seen_pos', flight.get('seen', 999)) > alerter.POSITION_MAX_AGE_SECONDS):
             continue
-        alerter.annotate_aircraft(flight, home_coords, db_url, settings['watchlist'])
+        alerter.annotate_aircraft(flight, home_coords, db_url, watch_index)
         aircraft.append(alerter.summarize_aircraft(flight))
 
     payload = {
@@ -371,9 +410,7 @@ def api_aircraft():
                       for entry in settings['watchlist']],
         'aircraft': aircraft,
     }
-    with live_cache_lock:
-        live_cache.update({'fetched_at': time.time(), 'key': cache_key, 'payload': payload})
-    return jsonify(payload)
+    return payload, 200
 
 
 @app.route('/api/alerts')
@@ -382,14 +419,14 @@ def api_alerts():
     with alerter.SENT_ALERTS_LOCK:
         sent_alerts = alerter.load_sent_alerts()
     rows = []
-    for row in sent_alerts.itertuples():
-        key = str(row.flight_num)
+    for row in sent_alerts:
+        key = row['flight_num']
         kind, aircraft, watch = 'military', key, None
         if key.startswith('watch:') and key.count(':') == 2:
             _, entry_id, aircraft = key.split(':')
             kind, watch = 'watch', watch_labels.get(entry_id, 'removed watchlist entry')
         rows.append({'key': key, 'kind': kind, 'aircraft': aircraft, 'watch': watch,
-                     'flight': str(row.flight_name).strip(), 'sent_at': float(row.sent_time)})
+                     'flight': row['flight_name'], 'sent_at': row['sent_time']})
     rows.sort(key=lambda row: row['sent_at'], reverse=True)
     alerts = {}
     for row in rows:
@@ -404,7 +441,7 @@ def api_alerts():
 def api_reset_alerts(key):
     with alerter.SENT_ALERTS_LOCK:
         sent_alerts = alerter.load_sent_alerts()
-        remaining = sent_alerts.loc[sent_alerts['flight_num'].astype(str) != key.lower()]
+        remaining = [row for row in sent_alerts if row['flight_num'] != key.lower()]
         removed = len(sent_alerts) - len(remaining)
         alerter.save_sent_alerts(remaining)
     logger.info('Reset alert history for ' + key + ' (' + str(removed) + ' removed)')
@@ -477,8 +514,11 @@ def api_logs():
 
 def main():
     setup_logging()
+    paths.prepare_data_dir()
     config.load_settings()  # migrates .env / CSV values into settings.json and secrets.json
     prepare_auth()
+    # The history file outlives restarts; the in-memory state doesn't.
+    state['last_email_at'] = alerter.last_alert_time()
     threading.Thread(target=scheduler_loop, name='scheduler', daemon=True).start()
     port = int(os.environ.get('WEB_PORT', '8095'))
     logger.info('Web UI listening on port ' + str(port))
