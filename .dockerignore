@@ -1,3 +1,8 @@
 .env
 .git
 venv/
+settings.json
+__pycache__/
+secrets.json
+settings.json.tmp
+secrets.json.tmp

@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Flight Alerter</title>
+  <meta name="color-scheme" content="dark">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23ff7a45' d='M21 16v-2l-8-5V3.5a1.5 1.5 0 0 0-3 0V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5z'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 16v-2l-8-5V3.5a1.5 1.5 0 0 0-3 0V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5z"/></svg>
+      <span>Flight Alerter</span>
+    </div>
+
+    <nav class="tabs" role="tablist">
+      <button role="tab" data-tab="dashboard" aria-selected="true">Dashboard</button>
+      <button role="tab" data-tab="alerts">Alerts</button>
+      <button role="tab" data-tab="settings">Settings</button>
+      <button role="tab" data-tab="log">Log</button>
+    </nav>
+
+    <div class="topbar-status">
+      <span id="status-pill" class="pill pill-muted"><span class="dot"></span><span id="status-text">Connecting…</span></span>
+      <span id="status-timing" class="muted small"></span>
+      <label class="switch" title="Pause or resume monitoring">
+        <input type="checkbox" id="quick-enabled">
+        <span class="track"></span>
+        <span class="switch-label">Monitoring</span>
+      </label>
+      <button id="run-now" class="btn btn-primary">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+        Run check
+      </button>
+    </div>
+  </header>
+
+  <div id="banner" class="banner" hidden></div>
+
+  <main>
+    <!-- Dashboard -->
+    <section id="tab-dashboard" class="tab-panel">
+      <div class="dash-grid">
+        <div class="card map-card">
+          <div class="card-head">
+            <h2>Live traffic</h2>
+            <div class="map-controls">
+              <span class="legend"><i class="swatch swatch-mil"></i>Military</span>
+              <span class="legend"><i class="swatch swatch-watch"></i>Watchlist</span>
+              <span class="legend"><i class="swatch swatch-civ"></i>Other</span>
+              <span class="legend"><i class="swatch swatch-ring"></i>Alert radius</span>
+              <label class="check"><input type="checkbox" id="military-only"> Military &amp; watchlist only</label>
+            </div>
+          </div>
+          <div id="map"></div>
+          <div id="map-error" class="map-error" hidden></div>
+        </div>
+
+        <div class="side">
+          <div class="stats">
+            <div class="stat">
+              <div class="stat-label">Aircraft tracked</div>
+              <div class="stat-value" id="stat-tracked">–</div>
+              <div class="stat-sub" id="stat-tracked-sub">&nbsp;</div>
+            </div>
+            <div class="stat">
+              <div class="stat-label">Military visible</div>
+              <div class="stat-value" id="stat-military">–</div>
+              <div class="stat-sub">anywhere in range of receiver</div>
+            </div>
+            <div class="stat stat-accent">
+              <div class="stat-label">Inside alert radius</div>
+              <div class="stat-value" id="stat-inrange">–</div>
+              <div class="stat-sub" id="stat-radius">&nbsp;</div>
+            </div>
+            <div class="stat">
+              <div class="stat-label">Last email</div>
+              <div class="stat-value stat-value-sm" id="stat-email">–</div>
+              <div class="stat-sub" id="stat-email-sub">&nbsp;</div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head"><h2>Military aircraft</h2><span class="muted small" id="military-count"></span></div>
+            <ul id="military-list" class="ac-list"></ul>
+          </div>
+
+          <div class="card">
+            <div class="card-head"><h2>Watchlist</h2><button type="button" class="btn btn-small" id="edit-watchlist">Edit</button></div>
+            <ul id="watch-status" class="ac-list"></ul>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <h2>Traffic per check</h2>
+              <span class="muted small" id="trend-range"></span>
+            </div>
+            <div class="trend" id="trend">
+              <svg id="trend-svg" preserveAspectRatio="none"></svg>
+              <div class="trend-tip" id="trend-tip" hidden></div>
+            </div>
+            <div class="trend-axis muted small"><span id="trend-start"></span><span>now</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Alerts -->
+    <section id="tab-alerts" class="tab-panel" hidden>
+      <div class="card">
+        <div class="card-head">
+          <h2>Sent alerts</h2>
+          <span class="muted small" id="alerts-total"></span>
+        </div>
+        <p class="muted small help">Each aircraft is emailed at most the number of times set in Settings. Reset an aircraft to let it alert again.</p>
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr><th>Aircraft</th><th>Callsign</th><th>Reason</th><th>Last sent</th><th class="num">Times</th><th></th></tr></thead>
+            <tbody id="alerts-body"></tbody>
+          </table>
+        </div>
+        <p id="alerts-empty" class="empty" hidden>No alerts sent yet.</p>
+      </div>
+    </section>
+
+    <!-- Settings -->
+    <section id="tab-settings" class="tab-panel" hidden>
+      <form id="settings-form" class="settings" novalidate>
+        <div class="card">
+          <h2>Alerting</h2>
+          <div class="field-row">
+            <label class="switch">
+              <input type="checkbox" name="enabled">
+              <span class="track"></span>
+              <span class="switch-label">Monitoring enabled</span>
+            </label>
+            <label class="switch">
+              <input type="checkbox" name="send_emails">
+              <span class="track"></span>
+              <span class="switch-label">Send emails</span>
+            </label>
+          </div>
+
+          <div class="field">
+            <label for="f-radius">Military alert radius</label>
+            <div class="range-row">
+              <input type="range" id="f-radius-range" min="1" max="150" step="1">
+              <div class="input-suffix"><input type="number" id="f-radius" name="alert_radius_miles" min="0.1" max="500" step="0.1"><span>mi</span></div>
+            </div>
+            <div class="error" data-error="alert_radius_miles"></div>
+          </div>
+
+          <div class="field">
+            <label for="f-recipient">Default email recipients</label>
+            <div class="chips" id="recipients">
+              <input type="email" id="f-recipient" placeholder="Add address and press Enter">
+            </div>
+            <div class="error" data-error="distribution_list"></div>
+          </div>
+
+          <div class="field">
+            <label for="f-subject">Military email subject</label>
+            <input type="text" id="f-subject" name="subject" maxlength="200">
+            <div class="hint">The number of aircraft is added in brackets.</div>
+            <div class="error" data-error="subject"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Location &amp; receiver</h2>
+          <div class="field">
+            <label for="f-url">Receiver data URL</label>
+            <div class="input-action">
+              <input type="url" id="f-url" name="aircraft_data_url" placeholder="http://receiver:8080/data/aircraft.json">
+              <button type="button" class="btn" id="test-receiver">Test</button>
+            </div>
+            <div class="hint" id="receiver-result"></div>
+            <div class="error" data-error="aircraft_data_url"></div>
+          </div>
+
+          <div class="field-grid">
+            <div class="field">
+              <label for="f-lat">Home latitude</label>
+              <input type="number" id="f-lat" name="home_lat" step="0.000001" min="-90" max="90">
+              <div class="error" data-error="home_lat"></div>
+            </div>
+            <div class="field">
+              <label for="f-lon">Home longitude</label>
+              <input type="number" id="f-lon" name="home_lon" step="0.000001" min="-180" max="180">
+              <div class="error" data-error="home_lon"></div>
+            </div>
+          </div>
+          <button type="button" class="btn" id="use-receiver-location">Use receiver's location</button>
+        </div>
+
+        <div class="card card-wide" id="watchlist-card">
+          <div class="card-head">
+            <h2>Watchlist</h2>
+            <button type="button" class="btn" id="add-watch">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></svg>
+              Add aircraft
+            </button>
+          </div>
+          <p class="hint help-tight">Get an email when a specific aircraft comes within its own radius, military or not. Match by tail number (N251BP), callsign (SWA2713) or ICAO hex code (A1B2C3). Leave recipients or subject blank to use the defaults above.</p>
+          <div id="watch-rows" class="watch-rows"></div>
+          <p id="watch-empty" class="empty" hidden>No aircraft on the watchlist.</p>
+          <div class="error" data-error="watchlist"></div>
+        </div>
+
+        <div class="card">
+          <h2>Timing &amp; limits</h2>
+          <div class="field-grid">
+            <div class="field">
+              <label for="f-interval">Check every</label>
+              <div class="input-suffix"><input type="number" id="f-interval" name="check_interval_seconds" min="15" max="3600" step="1"><span>sec</span></div>
+              <div class="error" data-error="check_interval_seconds"></div>
+            </div>
+            <div class="field">
+              <label for="f-max-alerts">Emails per aircraft</label>
+              <input type="number" id="f-max-alerts" name="max_alerts_per_aircraft" min="1" max="20" step="1">
+              <div class="error" data-error="max_alerts_per_aircraft"></div>
+            </div>
+            <div class="field">
+              <label for="f-realert">Wait between repeat emails</label>
+              <div class="input-suffix"><input type="number" id="f-realert" name="realert_minutes" min="0" max="1440" step="1"><span>min</span></div>
+              <div class="error" data-error="realert_minutes"></div>
+            </div>
+            <div class="field">
+              <label for="f-seen">Ignore aircraft not heard for</label>
+              <div class="input-suffix"><input type="number" id="f-seen" name="max_seen_seconds" min="1" max="300" step="1"><span>sec</span></div>
+              <div class="error" data-error="max_seen_seconds"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Email server</h2>
+          <div class="field-grid">
+            <div class="field field-span">
+              <label for="f-smtp-host">SMTP server</label>
+              <input type="text" id="f-smtp-host" name="smtp_hostname" placeholder="smtp.example.com" autocomplete="off" spellcheck="false">
+              <div class="error" data-error="smtp_hostname"></div>
+            </div>
+            <div class="field">
+              <label for="f-smtp-security">Encryption</label>
+              <select id="f-smtp-security" name="smtp_security">
+                <option value="ssl">SSL/TLS (usually port 465)</option>
+                <option value="starttls">STARTTLS (usually port 587)</option>
+              </select>
+              <div class="error" data-error="smtp_security"></div>
+            </div>
+            <div class="field">
+              <label for="f-smtp-port">Port</label>
+              <input type="number" id="f-smtp-port" name="smtp_port" min="1" max="65535" step="1">
+              <div class="error" data-error="smtp_port"></div>
+            </div>
+            <div class="field">
+              <label for="f-smtp-user">Username</label>
+              <input type="text" id="f-smtp-user" name="smtp_username" autocomplete="off" spellcheck="false">
+              <div class="hint">Also used as the From address.</div>
+              <div class="error" data-error="smtp_username"></div>
+            </div>
+            <div class="field">
+              <label for="f-smtp-password">Password</label>
+              <input type="password" id="f-smtp-password" name="smtp_password" autocomplete="new-password">
+              <div class="hint" id="smtp-password-hint"></div>
+              <div class="error" data-error="smtp_password"></div>
+            </div>
+            <div class="field field-span">
+              <label for="f-smtp-from">From name</label>
+              <input type="text" id="f-smtp-from" name="smtp_from_name" maxlength="100">
+              <div class="error" data-error="smtp_from_name"></div>
+            </div>
+          </div>
+          <div class="inline-actions">
+            <button type="button" class="btn" id="test-email">Send test email</button>
+            <span class="hint" id="test-email-result"></span>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Security</h2>
+          <p class="hint">Changing the password signs out every other browser.</p>
+          <div class="field">
+            <label for="pw-current">Current password</label>
+            <input type="password" id="pw-current" autocomplete="current-password">
+          </div>
+          <div class="field-grid">
+            <div class="field">
+              <label for="pw-new">New password</label>
+              <input type="password" id="pw-new" autocomplete="new-password" minlength="8">
+            </div>
+            <div class="field">
+              <label for="pw-confirm">Confirm new password</label>
+              <input type="password" id="pw-confirm" autocomplete="new-password">
+            </div>
+          </div>
+          <div class="hint" id="pw-result"></div>
+          <div class="inline-actions">
+            <button type="button" class="btn" id="change-password">Change password</button>
+            <button type="button" class="btn btn-ghost" id="sign-out">Sign out</button>
+          </div>
+        </div>
+
+        <div class="savebar" id="savebar" hidden>
+          <span>You have unsaved changes</span>
+          <div>
+            <button type="button" class="btn" id="discard">Discard</button>
+            <button type="submit" class="btn btn-primary" id="save">Save settings</button>
+          </div>
+        </div>
+      </form>
+    </section>
+
+    <!-- Log -->
+    <section id="tab-log" class="tab-panel" hidden>
+      <div class="card">
+        <div class="card-head">
+          <h2>Activity log</h2>
+          <label class="check"><input type="checkbox" id="log-follow" checked> Follow</label>
+        </div>
+        <div id="log" class="log" role="log" aria-live="polite"></div>
+      </div>
+    </section>
+  </main>
+
+  <template id="watch-row-template">
+    <div class="watch-row">
+      <div class="field">
+        <label>Aircraft</label>
+        <input type="text" data-watch="match" placeholder="N251BP" maxlength="20" spellcheck="false" autocomplete="off">
+      </div>
+      <div class="field">
+        <label>Nickname</label>
+        <input type="text" data-watch="label" placeholder="Optional" maxlength="60">
+      </div>
+      <div class="field">
+        <label>Radius</label>
+        <div class="input-suffix"><input type="number" data-watch="radius_miles" min="0.1" max="500" step="0.1"><span>mi</span></div>
+      </div>
+      <div class="field">
+        <label>Recipients</label>
+        <input type="text" data-watch="recipients" placeholder="Default list" spellcheck="false">
+      </div>
+      <div class="field">
+        <label>Subject</label>
+        <input type="text" data-watch="subject" placeholder="&lt;aircraft&gt; is within &lt;radius&gt; mi" maxlength="200">
+      </div>
+      <div class="watch-row-actions">
+        <label class="switch" title="Alert for this aircraft">
+          <input type="checkbox" data-watch="enabled">
+          <span class="track"></span>
+        </label>
+        <button type="button" class="btn btn-danger-ghost" data-remove-watch aria-label="Remove from watchlist">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3h6l1 2h4v2H4V5h4zm-3 6h12l-1 12H7z"/></svg>
+        </button>
+      </div>
+    </div>
+  </template>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

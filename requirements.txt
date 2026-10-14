@@ -10,3 +10,5 @@ pytz
 requests
 six
 urllib3
+flask
+waitress

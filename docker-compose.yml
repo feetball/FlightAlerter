@@ -5,5 +5,7 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env
+    ports:
+      - "${WEB_PORT:-8095}:${WEB_PORT:-8095}"
     volumes:
       - /opt/flightAlerter:/code
