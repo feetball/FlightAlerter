@@ -29,6 +29,8 @@ app.config.update(
 )
 
 LOG_LINES = deque(maxlen=300)
+# Log records arrive from any thread; iterating a deque while it is appended to raises RuntimeError.
+LOG_LINES_LOCK = threading.Lock()
 HISTORY = deque(maxlen=180)
 
 # Endpoints reachable without logging in.
@@ -61,7 +63,9 @@ setup_code = {'value': None}
 
 class MemoryLogHandler(logging.Handler):
     def emit(self, record):
-        LOG_LINES.append({'time': record.created, 'level': record.levelname, 'message': record.getMessage()})
+        line = {'time': record.created, 'level': record.levelname, 'message': record.getMessage()}
+        with LOG_LINES_LOCK:
+            LOG_LINES.append(line)
 
 
 def setup_logging():
@@ -465,7 +469,9 @@ def api_receiver():
 @app.route('/api/logs')
 def api_logs():
     since = request.args.get('since', type=float, default=0)
-    return jsonify({'lines': [line for line in LOG_LINES if line['time'] > since]})
+    with LOG_LINES_LOCK:
+        lines = [line for line in LOG_LINES if line['time'] > since]
+    return jsonify({'lines': lines})
 
 
 def main():

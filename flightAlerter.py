@@ -25,7 +25,10 @@ AIRCRAFT_DB_CACHE = {}
 # The receiver's database is split into shard files; cache them so per-aircraft lookups stay cheap.
 DB_SHARD_CACHE = {}
 DB_SHARD_TTL_SECONDS = 24 * 3600
-SENT_ALERTS_FILENAME = './sentAlerts.csv'
+# After a failed shard fetch, don't retry it for a while so an unreachable database can't stall every cycle.
+DB_SHARD_RETRY_SECONDS = 5 * 60
+DB_SHARD_FAILURES = {}
+SENT_ALERTS_FILENAME = os.path.join(config.DATA_DIR, 'sentAlerts.csv')
 SENT_ALERT_COLUMNS = ['flight_num', 'flight_name', 'sent_time']
 # Guards sentAlerts.csv, which both the check loop and the web UI touch.
 SENT_ALERTS_LOCK = threading.Lock()
@@ -70,6 +73,9 @@ def fetch_db_shard(db_url, block_key, timeout_seconds):
     cached = DB_SHARD_CACHE.get(cache_key)
     if cached and time.time() - cached[0] < DB_SHARD_TTL_SECONDS:
         return cached[1]
+    failed_at = DB_SHARD_FAILURES.get(cache_key)
+    if failed_at and time.time() - failed_at < DB_SHARD_RETRY_SECONDS:
+        return None
 
     try:
         response = requests.get(db_url + '/' + block_key + '.json', timeout=timeout_seconds)
@@ -79,8 +85,10 @@ def fetch_db_shard(db_url, block_key, timeout_seconds):
             response.raise_for_status()
             shard_data = response.json()
     except (requests.exceptions.RequestException, ValueError):
+        DB_SHARD_FAILURES[cache_key] = time.time()
         return None
 
+    DB_SHARD_FAILURES.pop(cache_key, None)
     DB_SHARD_CACHE[cache_key] = (time.time(), shard_data)
     return shard_data
 
@@ -188,9 +196,14 @@ def watch_entries_for(flight, watchlist):
     return [entry for entry in watchlist if entry['enabled'] and normalize_ident(entry['match']) in idents]
 
 
-def annotate_aircraft(flight, home_coords, db_url, watchlist):
+def annotate_aircraft(flight, home_coords, db_url, watchlist, db_lookup_radius=None):
+    """Adds distance, database fields, military flag and matching watchlist entries.
+
+    With db_lookup_radius, aircraft farther away are classified from the receiver's own fields only,
+    skipping the database lookup (several HTTP requests for an aircraft not seen before)."""
     flight['distance'] = round(geopy.distance.distance(home_coords, (flight['lat'], flight['lon'])).mi, 1)
-    enrich_flight_with_aircraft_db(flight, db_url)
+    if db_lookup_radius is None or flight['distance'] <= db_lookup_radius:
+        enrich_flight_with_aircraft_db(flight, db_url)
     flight['military'] = is_military_aircraft(flight)
     flight['watch_entries'] = watch_entries_for(flight, watchlist)
     return flight
@@ -284,6 +297,10 @@ def run_check(settings):
     aircraft = json_dump.get('aircraft', [])
     result['aircraft_total'] = len(aircraft)
 
+    # Aircraft outside every alert radius can't trigger an email, so they don't need a database lookup.
+    lookup_radius = max([settings['alert_radius_miles']]
+                        + [entry['radius_miles'] for entry in settings['watchlist'] if entry['enabled']])
+
     # (entry, [flights]) for each watchlist entry with a matching aircraft inside its own radius
     watch_hits = {}
     for flight in aircraft:
@@ -293,7 +310,7 @@ def run_check(settings):
             continue
         result['aircraft_positioned'] += 1
 
-        annotate_aircraft(flight, home_coords, aircraft_db_url, settings['watchlist'])
+        annotate_aircraft(flight, home_coords, aircraft_db_url, settings['watchlist'], lookup_radius)
         for entry in flight['watch_entries']:
             if flight['distance'] <= entry['radius_miles']:
                 watch_hits.setdefault(entry['id'], (entry, []))[1].append(flight)

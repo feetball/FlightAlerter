@@ -9,16 +9,18 @@ import pandas as pd
 import secret_store
 
 
-SETTINGS_FILENAME = './settings.json'
-LEGACY_CONFIG_FILENAMES = ['./militaryFlights.csv', './monitoredFlits.csv', './monitoredFlights.csv']
-LEGACY_WATCHLIST_FILENAME = './monitoredFlights.csv'
+DATA_DIR = os.environ.get('DATA_DIR', '.')
+SETTINGS_FILENAME = os.path.join(DATA_DIR, 'settings.json')
+LEGACY_CONFIG_FILENAMES = [os.path.join(DATA_DIR, name) for name in ('militaryFlights.csv', 'monitoredFlits.csv', 'monitoredFlights.csv')]
+LEGACY_WATCHLIST_FILENAME = os.path.join(DATA_DIR, 'monitoredFlights.csv')
 
 EMAIL_PATTERN = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 HOSTNAME_PATTERN = re.compile(r'^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$')
 IDENT_PATTERN = re.compile(r'^[A-Za-z0-9-]{1,20}$')
 MAX_WATCHLIST_ENTRIES = 100
 
-_lock = threading.Lock()
+# Reentrant so update_settings can hold it across load_settings() and the write.
+_lock = threading.RLock()
 
 
 def _env_float(name, default):
@@ -305,8 +307,8 @@ def update_settings(changes):
         return public_settings(), errors
 
     password = cleaned.pop('smtp_password', None)
-    settings = load_settings()
     with _lock:
+        settings = load_settings()
         settings.update(cleaned)
         _write(settings)
     if password is not None:

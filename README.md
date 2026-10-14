@@ -73,8 +73,9 @@ With Docker:
 On a first install, `deploy.sh` prints the setup code for you. It is a wrapper around
 `docker-compose up -d --build`, which also works on its own.
 
-The container runs the code from this folder (mounted at `/code`), so settings and
-alert history survive rebuilds.
+The container runs the code baked into the image. This folder is mounted at `/data`
+(`DATA_DIR`), where settings, secrets and alert history are kept, so they survive
+rebuilds.
 
 Without Docker:
 
