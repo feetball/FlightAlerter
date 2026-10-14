@@ -17,7 +17,6 @@ RUN pip3 install --no-cache-dir numpy
 
 COPY requirements.txt requirements.txt
 COPY monitoredFlights.csv monitoredFlights.csv
-COPY sentAlerts.csv sentAlerts.csv
 #COPY cronFlightAlerter /etc/cron.d/cronFlightAlerter
 #RUN chmod 0644 /etc/cron.d/cronFlightAlerter
 #RUN crontab /etc/cron.d/cronFlightAlerter

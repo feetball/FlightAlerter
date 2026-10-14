@@ -171,7 +171,7 @@ errors. **Follow** keeps the newest line in view.
 |--------------------|-------------------------------------------------------------|---------|
 | `settings.json`    | All settings except passwords                               | No      |
 | `secrets.json`     | SMTP password, admin password hash, session signing key     | No      |
-| `sentAlerts.csv`   | Which aircraft have been emailed, and when                  | Yes     |
+| `sentAlerts.csv`   | Which aircraft have been emailed, and when                  | No      |
 | `.env`             | Optional first-start values (see `.env.example`)            | No      |
 
 `militaryFlights.csv` and `monitoredFlights.csv` are the old config files. If they

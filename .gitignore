@@ -5,3 +5,4 @@ settings.json
 settings.json.tmp
 secrets.json
 secrets.json.tmp
+sentAlerts.csv
