@@ -386,7 +386,13 @@ def api_alerts():
         rows.append({'key': key, 'kind': kind, 'aircraft': aircraft, 'watch': watch,
                      'flight': str(row.flight_name).strip(), 'sent_at': float(row.sent_time)})
     rows.sort(key=lambda row: row['sent_at'], reverse=True)
-    return jsonify({'alerts': rows[:500], 'total': len(rows)})
+    alerts = {}
+    for row in rows:
+        if row['key'] in alerts:
+            alerts[row['key']]['count'] += 1
+        else:
+            alerts[row['key']] = {**row, 'count': 1}
+    return jsonify({'alerts': list(alerts.values()), 'total': len(rows)})
 
 
 @app.route('/api/alerts/<key>', methods=['DELETE'])

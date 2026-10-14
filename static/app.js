@@ -436,20 +436,14 @@ async function refreshAlerts() {
   if (ui.tab !== 'alerts') return;
   try {
     const data = await api('/api/alerts');
-    const grouped = new Map();
-    for (const alert of data.alerts) {
-      const entry = grouped.get(alert.key) || { ...alert, last: alert.sent_at, count: 0 };
-      entry.count += 1;
-      grouped.set(alert.key, entry);
-    }
-    const rows = [...grouped.values()];
+    const rows = data.alerts;
     $('#alerts-total').textContent = data.total + ' email' + (data.total === 1 ? '' : 's') + ' sent';
     $('#alerts-empty').hidden = rows.length > 0;
     $('#alerts-body').innerHTML = rows.map((row) =>
       '<tr><td class="mono">' + escapeHtml(row.aircraft.toUpperCase()) + '</td>' +
       '<td class="mono">' + escapeHtml(row.flight || '–') + '</td>' +
       '<td>' + (row.kind === 'watch' ? '<span class="tag tag-watch">Watchlist · ' + escapeHtml(row.watch) + '</span>' : '<span class="tag tag-mil">Military</span>') + '</td>' +
-      '<td title="' + escapeHtml(new Date(row.last * 1000).toLocaleString()) + '">' + escapeHtml(dateTime(row.last)) + ' <span class="muted">(' + ago(row.last) + ')</span></td>' +
+      '<td title="' + escapeHtml(new Date(row.sent_at * 1000).toLocaleString()) + '">' + escapeHtml(dateTime(row.sent_at)) + ' <span class="muted">(' + ago(row.sent_at) + ')</span></td>' +
       '<td class="num">' + row.count + '</td>' +
       '<td class="num"><button class="btn btn-danger-ghost" data-reset="' + escapeHtml(row.key) + '" data-name="' + escapeHtml(row.aircraft.toUpperCase()) + '">Reset</button></td></tr>'
     ).join('');
