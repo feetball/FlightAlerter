@@ -3,19 +3,20 @@
 Sends an email when a military aircraft, or an aircraft on your watchlist, flies near
 your location. It reads live positions from your own ADS-B receiver.
 
-Every minute it fetches `aircraft.json` from a SkyAware / tar1090 / readsb receiver and
-sends email for:
+Every minute (configurable) it fetches `aircraft.json` from a SkyAware / tar1090 /
+readsb receiver and sends email for:
 
 - **Military aircraft** within the alert radius, in one summary email listing them by
   distance
-- **Watchlist aircraft** within their own radius. Each entry has its own recipients and
-  subject, and can be matched by tail number, callsign or ICAO hex code.
+- **Watchlist aircraft** within their own radius, one email per watchlist entry. Entries
+  are matched by tail number, callsign or ICAO hex code, and can have their own
+  recipients and subject.
 
 Aircraft type and registration are looked up in the receiver's aircraft database. That
 means a tail number on the watchlist is recognised even when the aircraft isn't
 broadcasting it as its callsign.
 
-A password-protected web dashboard (port 8095) shows:
+A password-protected web dashboard (port 8095 by default) shows:
 
 - a live map of traffic, with military and watchlist aircraft highlighted and the alert
   radius drawn
@@ -30,35 +31,28 @@ A password-protected web dashboard (port 8095) shows:
   aircraft database (SkyAware and tar1090 both do)
 - An SMTP account that can send mail over SSL/TLS or STARTTLS (an app password is
   recommended)
-- Docker and docker-compose, or Python 3 to run it without Docker
+- Docker with Docker Compose, or Python 3 to run it without Docker
+- A browser with internet access for the dashboard map (tiles come from OpenStreetMap)
 
 ## Setup
 
-1. Optionally, create a `.env` file from the example to pre-fill settings:
+1. Start the service (see [Running](#running)) and open `http://<host>:8095`.
+
+2. Create the admin password (at least 8 characters). To prove you run the server, the
+   page asks for a one-time setup code, which is printed in the server log. On a first
+   install `./deploy.sh` prints it for you. Otherwise:
 
    ```sh
-   cp .env.example .env
-   chmod 600 .env
+   docker compose logs flightalerter | grep "setup code"
    ```
 
-   These values are only used on the first start. You can skip this and enter
-   everything in the dashboard instead. Once the service has started, you can remove
-   the SMTP password from `.env`.
+   A new code is printed every time the service starts until a password is set.
 
-2. Start the service (see below) and open `http://<host>:8095`.
-
-3. On first visit you'll be asked to create an admin password. To prove you run the
-   server, enter the one-time setup code printed in its log:
-
-   ```sh
-   docker logs flightalerter-flightalerter-1 | grep "setup code"
-   ```
-
-   If `WEB_PASSWORD` is set in `.env`, it becomes the initial password and no setup
-   code is needed.
-
-4. Fill in the **Settings** page: receiver URL, home location, recipients, email server,
+3. Fill in the **Settings** page: receiver URL, home location, recipients, email server,
    watchlist. Use **Send test email** to check the email settings.
+
+Nothing else is required. See [Optional `.env` file](#optional-env-file) for changing
+the port or running behind HTTPS.
 
 ## Running
 
@@ -68,16 +62,19 @@ With Docker:
 ./deploy.sh            # build, restart, wait until the dashboard answers
 ./deploy.sh --pull     # git pull first
 ./deploy.sh --logs     # follow the logs afterwards
+./deploy.sh --down     # stop and remove the container (settings and history are kept)
 ```
 
-On a first install, `deploy.sh` prints the setup code for you. It is a wrapper around
-`docker-compose up -d --build`, which also works on its own.
+`deploy.sh` runs `docker compose build` and `docker compose up -d`, which you can also
+run yourself. Compose needs a `.env` file to exist, even an empty one; `deploy.sh`
+creates it if it is missing.
 
-The container runs the code baked into the image. This folder is mounted at `/data`
-(`DATA_DIR`), where settings, secrets and alert history are kept, so they survive
-rebuilds.
+The container runs the code built into the image. This folder is mounted into the
+container at `/data`, where settings, secrets and alert history are kept, so they
+survive rebuilds.
 
-Without Docker:
+Without Docker, run it from this folder (settings and history are kept in the current
+directory, or in `DATA_DIR` if you set it):
 
 ```sh
 python3 -m venv venv
@@ -85,75 +82,98 @@ venv/bin/pip install -r requirements.txt
 venv/bin/python app.py
 ```
 
-`venv/bin/python flightAlerter.py` runs a single check without the web server, which is
-handy for cron or testing.
+`.env` is not read when running without Docker; export any of its variables in the
+shell instead. `venv/bin/python flightAlerter.py` runs a single check, sending any
+emails that are due, without the web server.
+
+## Optional `.env` file
+
+Docker Compose reads `.env` from this folder. All of it is optional:
+
+| Variable | Effect |
+|----------|--------|
+| `WEB_PORT` | Dashboard port (default 8095). The only way to change it. |
+| `WEB_HTTPS` | Set to `1` when the dashboard is served over HTTPS by a reverse proxy, so the login cookie is only sent over HTTPS. |
+| `WEB_PASSWORD` | Initial admin password, used instead of the setup code. Ignored once a password exists. |
+| `SMTP_HOSTNAME`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM_NAME`, `HOME_LAT`, `HOME_LON`, `AIRCRAFT_DATA_URL` | Pre-fill settings on the very first start only. After that, change them in the dashboard. |
+
+`.env.example` lists them all. Keep the file private (`chmod 600 .env`). Once the
+service has started, delete `SMTP_PASSWORD` and `WEB_PASSWORD` from it: they have been
+saved in `secrets.json` and are no longer read.
 
 ## Using the dashboard
 
-Open `http://<host>:8095` and sign in. The browser needs internet access for the map
-(tiles come from OpenStreetMap). Everything else is served by Flight Alerter itself.
+Open `http://<host>:8095` and sign in.
 
 ### Top bar
 
-- **Status pill**: *Monitoring* (all good), *Checking…*, *Paused*, *Error* or *Offline*
-  (the browser lost contact with the service). Next to it: when the last check ran and
-  when the next one is due.
+- **Status pill**: *Monitoring* (all good), *Checking…*, *Paused*, *Error*,
+  *Starting…* (no check yet) or *Offline* (the browser lost contact with the service).
+  Next to it: when the last check ran and when the next one is due.
 - **Monitoring** switch: pauses or resumes the regular checks straight away, without
-  touching other settings. While paused, nothing is checked and no email is sent.
-- **Run check**: runs a check now, outside the schedule. Any email that is due is sent,
-  so this is a quick end-to-end test once the settings are filled in.
-- A red banner under the bar shows the last error, for example an unreachable receiver.
+  touching other settings. While paused, no scheduled checks run and no email is sent.
+- **Run check**: runs a check now, even while paused. Any email that is due is sent, so
+  this is a quick end-to-end test once the settings are filled in.
+- A red banner under the bar shows why the last check failed, for example an
+  unreachable receiver.
 
 ### Dashboard
 
 - **Live traffic** map, updated every few seconds. Orange is military, purple is a
   watchlist aircraft, grey-blue is everything else. The dashed circle is the military
   alert radius around your home location. Click an aircraft for its type, registration,
-  hex code, distance, altitude, speed, heading and squawk. **Military & watchlist only** hides other traffic.
-- **Stat cards**: aircraft tracked, military aircraft anywhere in receiver range,
-  military aircraft inside the alert radius, and when the last email went out. If that
-  card says *Emails off* or *Not set up*, see Settings.
+  hex code, distance, altitude, speed, heading and squawk. **Military & watchlist only**
+  hides other traffic.
+- **Stat cards**: aircraft on the map (with a position fix), military aircraft anywhere
+  in receiver range, military aircraft inside the alert radius, and when the last email
+  went out. If that card says *Emails off* or *Not set up*, see Settings.
 - **Military aircraft** lists the military aircraft in view, nearest first. Items inside
-  the radius are highlighted. Click one (or select it and press Enter) to fly the map to it.
+  the radius are highlighted. Click one (or select it and press Enter) to fly the map to
+  it.
 - **Watchlist** shows each watched aircraft and whether it is in view. Click one in view
   to find it on the map. **Edit** jumps to the watchlist in Settings.
-- **Traffic per check** charts aircraft counts for recent checks. Hover for details.
+- **Traffic per check** charts how many aircraft each recent check saw. Hover for the
+  exact count. It starts empty after a restart.
 
 ### Alerts
 
-One row per aircraft that has been emailed, newest first. The row shows why it was
-emailed (military or which watchlist entry), when it was last sent, and how many times.
-**Reset** clears that aircraft's history so it can alert again, for example after you
-raise the per-aircraft limit or want a fresh email the next time it passes.
+One row per aircraft and reason (military, or a watchlist entry), newest first. An
+aircraft that was emailed both as military and as a watchlist match has two rows. Each
+row shows the callsign, when the last email was sent and how many have been sent.
+**Reset** clears that row's history so the aircraft can alert again, for example after
+you raise the per-aircraft limit or want a fresh email the next time it passes.
 
 ### Settings
 
-Changes are not applied until you press **Save settings** in the bar at the bottom.
-**Discard** puts the form back to the saved values. Fields with problems are marked in
-red, and nothing is saved until they are fixed.
+Changes are not applied until you press **Save settings** in the bar that appears at
+the bottom. **Discard** puts the form back to the saved values. Fields with problems are
+marked in red, and nothing is saved until they are fixed. Saving runs a check straight
+away when monitoring is on.
 
-- **Alerting**: master on/off for monitoring, **Send emails** (turn off to watch the
-  dashboard without sending mail), the military alert radius, default recipients (type
-  an address and press Enter or comma; click × to remove one) and the email subject.
+- **Alerting**: monitoring on/off (same as the top-bar switch), **Send emails** (turn
+  off to watch the dashboard without sending mail), the military alert radius, default
+  recipients (type an address and press Enter or comma; click × to remove one) and the
+  military email subject.
 - **Location & receiver**: the receiver's `aircraft.json` URL. **Test** checks that it
   answers and shows how many aircraft it reports. **Use receiver's location** fills in
   home latitude and longitude from the receiver, if it publishes them. Save afterwards.
 - **Watchlist**: **Add aircraft**, then enter a tail number (`N251BP`), callsign
   (`SWA2713`) or ICAO hex code (`A1B2C3`). Optional nickname, radius, recipients and
-  subject per entry. Blank recipients or subject use the defaults above. Untick an entry
-  to pause it without deleting it.
+  subject per entry. Blank recipients use the default recipients; a blank subject
+  becomes "*name* is within *N* mi". Untick an entry to pause it without deleting it.
 - **Timing & limits**: how often to check, emails per aircraft, the wait between repeat
-  emails, and how stale a position can be before the aircraft is ignored.
-- **Email server**: SMTP host, encryption (SSL/TLS on 465 or STARTTLS on 587), port,
-  username (also the From address), password and From name. The password field stays
-  blank. Leave it blank to keep the saved one. **Send test email** sends to the default
-  recipients using the saved settings, so save first.
+  emails, and how long since an aircraft was last heard before it is ignored.
+- **Email server**: SMTP host, encryption (SSL/TLS, usually port 465, or STARTTLS,
+  usually 587), port, username (also the From address), password and From name. The
+  password is never shown; leave the field blank to keep the saved one. **Send test
+  email** sends to the default recipients using the saved settings, so save first.
 - **Security**: change the admin password (signs out every other browser) or sign out.
 
 ### Log
 
 The service's recent activity: checks, emails sent, settings changes, sign-ins and
-errors. **Follow** keeps the newest line in view.
+errors. **Follow** keeps the newest line in view. It holds the last 300 lines and is
+cleared on restart; `docker compose logs flightalerter` has the full history.
 
 ### Troubleshooting
 
@@ -163,20 +183,22 @@ errors. **Follow** keeps the newest line in view.
 | Last email: *Not set up* | Fill in Settings → Email server, save, then **Send test email**. |
 | An aircraft in range but no email | Check the Alerts page: it may have hit its email limit or still be in the wait between repeats. **Reset** it there. Also check that **Send emails** is on. |
 | Map tiles say *Access blocked* | Hard-refresh the page (Ctrl+Shift+R). OpenStreetMap refuses some requests; see its tile usage policy. |
-| *Offline* banner | The service isn't running: `./deploy.sh` or `docker logs flightalerter-flightalerter-1`. |
+| *Offline* | The browser can't reach the service. Check it is running: `./deploy.sh`, or `docker compose logs flightalerter` for errors. |
 
 ## Files
+
+Kept in this folder (`/data` inside the container):
 
 | File               | Contents                                                    | In git? |
 |--------------------|-------------------------------------------------------------|---------|
 | `settings.json`    | All settings except passwords                               | No      |
 | `secrets.json`     | SMTP password, admin password hash, session signing key     | No      |
 | `sentAlerts.csv`   | Which aircraft have been emailed, and when                  | No      |
-| `.env`             | Optional first-start values (see `.env.example`)            | No      |
+| `.env`             | Optional, see [above](#optional-env-file)                   | No      |
 
-`militaryFlights.csv` and `monitoredFlights.csv` are the old config files. If they
-exist on first start, their values are imported into `settings.json` and the
-watchlist. After that they are ignored.
+`militaryFlights.csv` and `monitoredFlights.csv` are config files from older versions.
+If they exist when `settings.json` doesn't, their values are imported into the settings
+and the watchlist. After that they are ignored.
 
 ## Security
 
@@ -185,44 +207,50 @@ watchlist. After that they are ignored.
   30 days.
 - **Changing the password** signs out every other browser. Signing out only clears the
   cookie in that browser, so change the password if you think a session was stolen.
-- **Wrong passwords.** After 5 wrong attempts, logins from that address are refused
-  for 15 minutes.
+- **Wrong passwords.** After 5 wrong attempts (login, setup code or current password),
+  that address is refused for 15 minutes. Behind a reverse proxy every visitor shares
+  the proxy's address, so they are locked out together.
 - **Forged requests.** Every request that changes something must carry a custom header,
   which blocks cross-site request forgery. Pages are sent with a strict Content Security
   Policy and can't be embedded in frames.
 - **SMTP password.** It's write-only in the UI: it is never sent back to the browser or
   written to the log. It's stored in plain text in `secrets.json`, which only its owner
-  can read, as `.env` was before.
+  can read.
 - **Certificates.** Email is sent over TLS, and the mail server's certificate is
   verified.
 - **HTTPS.** The dashboard itself speaks plain HTTP. Keep it on your LAN. To reach it
   from outside, put it behind a reverse proxy with HTTPS and set `WEB_HTTPS=1` so the
   session cookie is only sent over HTTPS.
 
-**Forgot the admin password?** Delete the `admin_password_hash` line from
-`secrets.json` and restart. A new setup code will be printed in the log.
+**Forgot the admin password?** In `secrets.json`, change the value of
+`admin_password_hash` to `""` and restart (`docker compose restart`). A new setup code
+is printed in the log. If `WEB_PASSWORD` is still set in `.env`, it becomes the password
+instead.
 
 ## How aircraft are classified as military
 
 An aircraft counts as military if any of these is true:
 
-- The receiver database marks it military (`dbFlags` bit 1, or `military: true`)
+- The receiver database marks it military (`dbFlags` lowest bit set, or
+  `military: true`)
 - Its operator field contains words such as `AIR FORCE`, `USAF`, `NAVY`, `ARMY` or
   `COAST GUARD`
-- Its callsign matches a known military prefix (`RCH`, `REACH`, `PAT`, `SPAR`, and others)
+- Its callsign is a known military prefix followed by digits (`RCH`, `REACH`, `PAT`,
+  `SPAR`, and others)
 
-The database lookup is skipped for aircraft outside every alert radius (they can't
-trigger an email anyway), so those are classified from the receiver's own data only.
+To keep checks fast, the database lookup is skipped for aircraft outside every alert
+radius (they can't trigger an email anyway), so those are classified from the
+receiver's own data only. The dashboard map always looks them up.
 
 Aircraft not heard from in the last 10 seconds (configurable), or with no position,
-are skipped.
+are skipped by the check.
 
 ## Alert limits
 
 Sent alerts are logged in `sentAlerts.csv`. By default each aircraft triggers at most
-two emails, at least 30 minutes apart; both limits can be changed in Settings. Military
-and watchlist alerts are counted separately. To let an aircraft alert again, reset it on
-the **Alerts** page.
+two emails, more than 30 minutes apart; both limits can be changed in Settings. Military
+alerts and each watchlist entry are counted separately. To let an aircraft alert again,
+reset it on the **Alerts** page.
 
 While **Send emails** is off, nothing is recorded, so aircraft still in range alert
 once emails are turned back on.
