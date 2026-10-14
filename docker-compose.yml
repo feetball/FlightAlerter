@@ -1,0 +1,9 @@
+version: '3.3'
+services:
+  flightalerter:
+    # image: flightalerter
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - /opt/flightAlerter:/code
