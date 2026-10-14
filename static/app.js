@@ -224,7 +224,7 @@ function renderMilitaryList(payload) {
   }
   list.innerHTML = military.map((ac) => {
     const near = ac.distance <= payload.radius_miles;
-    return '<li class="ac-item' + (near ? ' in-range' : '') + '" data-hex="' + escapeHtml(ac.hex) + '" tabindex="0">' +
+    return '<li class="ac-item' + (near ? ' in-range' : '') + '" data-hex="' + escapeHtml(ac.hex) + '" role="button" tabindex="0">' +
       '<span class="ac-call">' + escapeHtml(callsign(ac)) + '</span>' +
       '<span class="ac-dist">' + ac.distance + ' mi</span>' +
       '<span class="ac-meta">' + escapeHtml(ac.type) + (ac.registration ? ' · ' + escapeHtml(ac.registration) : '') + '</span>' +
