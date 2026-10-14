@@ -309,3 +309,18 @@ or, without Docker, `venv/bin/python -m unittest discover -s tests -t .` from th
 
 Dependencies are pinned in `requirements.txt`. To upgrade, change the versions there,
 rebuild and run the tests.
+
+## Releases
+
+The version number is in the `VERSION` file ([Semantic Versioning](https://semver.org));
+the dashboard shows it next to the name. [CHANGELOG.md](CHANGELOG.md) lists what changed.
+
+To make a release: update `VERSION` and `CHANGELOG.md`, commit, then tag and publish:
+
+```sh
+git tag -a v1.1.0 -m "v1.1.0"
+git push origin v1.1.0
+gh release create v1.1.0 --title "v1.1.0" --notes-file <(sed -n '/^## 1.1.0/,/^## /p' CHANGELOG.md | sed '$d')
+```
+
+To update an install to a release: `git fetch --tags && git checkout v1.1.0 && ./deploy.sh`.
