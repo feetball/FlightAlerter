@@ -65,8 +65,13 @@ A password-protected web dashboard (port 8095) shows:
 With Docker:
 
 ```sh
-docker-compose up -d --build
+./deploy.sh            # build, restart, wait until the dashboard answers
+./deploy.sh --pull     # git pull first
+./deploy.sh --logs     # follow the logs afterwards
 ```
+
+On a first install, `deploy.sh` prints the setup code for you. It is a wrapper around
+`docker-compose up -d --build`, which also works on its own.
 
 The container runs the code from this folder (mounted at `/code`), so settings and
 alert history survive rebuilds.
