@@ -19,10 +19,13 @@ function escapeHtml(value) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
-    ...options,
-    headers: options.body ? { 'Content-Type': 'application/json' } : undefined,
-  });
+  const headers = { 'X-Requested-With': 'FlightAlerter' };
+  if (options.body) headers['Content-Type'] = 'application/json';
+  const response = await fetch(path, { ...options, headers });
+  if (response.status === 401) {
+    location.replace('/login');
+    throw new Error('Signed out');
+  }
   let data = null;
   try { data = await response.json(); } catch (_) { /* empty body */ }
   if (!response.ok) {
@@ -105,10 +108,15 @@ const radiusCircle = L.circle([0, 0], {
 });
 const aircraftMarkers = new Map();
 
+function isWatched(ac) {
+  return ac.watched && ac.watched.length > 0;
+}
+
 function planeIcon(ac) {
-  const kind = ac.military ? 'mil' : 'civ';
+  const kind = isWatched(ac) ? 'watch' : ac.military ? 'mil' : 'civ';
   const rotation = typeof ac.track === 'number' ? ac.track : 0;
-  const label = ac.military ? '<span class="plane-label">' + escapeHtml(callsign(ac)) + '</span>' : '';
+  const text = isWatched(ac) ? ac.watched[0].label : callsign(ac);
+  const label = kind !== 'civ' ? '<span class="plane-label">' + escapeHtml(text) + '</span>' : '';
   return L.divIcon({
     className: '',
     html: '<div class="plane plane-' + kind + '"><svg viewBox="0 0 24 24" style="transform: rotate(' + rotation + 'deg)"><path d="' + PLANE_PATH + '"/></svg>' + label + '</div>',
@@ -128,7 +136,9 @@ function popupHtml(ac) {
     ['Heading', typeof ac.track === 'number' ? Math.round(ac.track) + '°' : '–'],
     ['Squawk', ac.squawk || '–'],
   ];
-  return '<div class="popup-title">' + escapeHtml(callsign(ac)) + (ac.military ? '<span class="badge">Military</span>' : '') + '</div>' +
+  const badges = (ac.military ? '<span class="badge">Military</span>' : '') +
+    (isWatched(ac) ? '<span class="badge badge-watch">' + escapeHtml(ac.watched.map((w) => w.label).join(', ')) + '</span>' : '');
+  return '<div class="popup-title">' + escapeHtml(callsign(ac)) + badges + '</div>' +
     '<dl class="popup-grid">' + rows.map(([k, v]) => '<dt>' + k + '</dt><dd>' + escapeHtml(v) + '</dd>').join('') + '</dl>';
 }
 
@@ -141,22 +151,22 @@ function updateMap(payload) {
     ui.mapFitted = true;
   }
 
-  const visible = payload.aircraft.filter((ac) => ac.military || !ui.militaryOnly);
+  const visible = payload.aircraft.filter((ac) => ac.military || isWatched(ac) || !ui.militaryOnly);
   const seen = new Set();
   for (const ac of visible) {
     seen.add(ac.hex);
     let marker = aircraftMarkers.get(ac.hex);
     if (!marker) {
-      marker = L.marker([ac.lat, ac.lon], { zIndexOffset: ac.military ? 1000 : 0 }).bindPopup('');
+      marker = L.marker([ac.lat, ac.lon]).bindPopup('');
       marker.addTo(map);
       aircraftMarkers.set(ac.hex, marker);
     }
     marker.setLatLng([ac.lat, ac.lon]);
     // Rebuilding the icon resets its DOM, so only do it when something visible changed.
-    const iconKey = ac.military + '|' + Math.round(ac.track || 0) + '|' + callsign(ac);
+    const iconKey = ac.military + '|' + (ac.watched || []).map((w) => w.label).join(',') + '|' + Math.round(ac.track || 0) + '|' + callsign(ac);
     if (marker.iconKey !== iconKey) {
       marker.setIcon(planeIcon(ac));
-      marker.setZIndexOffset(ac.military ? 1000 : 0);
+      marker.setZIndexOffset(isWatched(ac) ? 2000 : ac.military ? 1000 : 0);
       marker.iconKey = iconKey;
     }
     marker.aircraft = ac;
@@ -190,6 +200,7 @@ async function refreshAircraft() {
     $('#map-error').hidden = true;
     updateMap(payload);
     renderMilitaryList(payload);
+    renderWatchStatus(payload);
     $('#stat-tracked').textContent = payload.aircraft.length;
     $('#stat-tracked-sub').textContent = 'with a position fix';
   } catch (error) {
@@ -221,6 +232,37 @@ function renderMilitaryList(payload) {
       '</li>';
   }).join('');
 }
+
+function renderWatchStatus(payload) {
+  const list = $('#watch-status');
+  if (!payload.watchlist.length) {
+    list.innerHTML = '<li class="empty">Nothing on the watchlist. Use Edit to add a tail number.</li>';
+    return;
+  }
+  list.innerHTML = payload.watchlist.map((entry) => {
+    const matches = payload.aircraft.filter((ac) => (ac.watched || []).some((w) => w.id === entry.id))
+      .sort((a, b) => a.distance - b.distance);
+    const ac = matches[0];
+    const inRange = ac && ac.distance <= entry.radius_miles;
+    const classes = ['ac-item', 'watch-item', ac ? 'in-view' : '', inRange ? 'in-range' : '', entry.enabled ? '' : 'off'].join(' ');
+    return '<li class="' + classes + '"' + (ac ? ' data-hex="' + escapeHtml(ac.hex) + '" tabindex="0"' : '') + '>' +
+      '<span class="ac-call">' + escapeHtml(entry.label) + '</span>' +
+      '<span class="ac-dist">' + (ac ? ac.distance + ' mi' : '–') + '</span>' +
+      '<span class="ac-meta">' + (entry.label !== entry.match ? escapeHtml(entry.match) + ' · ' : '') +
+        (entry.enabled ? 'alerts within ' + entry.radius_miles + ' mi' : 'alerts off') + '</span>' +
+      '<span class="ac-meta-r">' + (ac ? escapeHtml(formatAltitude(ac.altitude)) : 'not in view') + '</span>' +
+      '</li>';
+  }).join('');
+}
+
+$('#watch-status').addEventListener('click', (event) => {
+  const item = event.target.closest('.ac-item[data-hex]');
+  if (item) focusAircraft(item.dataset.hex);
+});
+$('#edit-watchlist').addEventListener('click', () => {
+  showTab('settings');
+  setTimeout(() => $('#watchlist-card').scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
+});
 
 $('#military-list').addEventListener('click', (event) => {
   const item = event.target.closest('.ac-item');
@@ -285,7 +327,7 @@ function renderStatus() {
     $('#stat-email-sub').textContent = 'turn on in Settings';
   } else if (!s.smtp.configured) {
     $('#stat-email').textContent = 'Not set up';
-    $('#stat-email-sub').textContent = 'add SMTP login to .env';
+    $('#stat-email-sub').textContent = 'add the email server in Settings';
   } else {
     $('#stat-email').textContent = s.last_email_at ? ago(s.last_email_at, now) : 'None yet';
     $('#stat-email-sub').textContent = s.last_email_at ? dateTime(s.last_email_at) : 'since the service started';
@@ -299,8 +341,8 @@ $('#run-now').addEventListener('click', async () => {
   try {
     const result = await api('/api/run', { method: 'POST' });
     if (!result.ok) toast('Check failed: ' + result.error, 'bad');
-    else if (result.email_sent) toast('Emailed about ' + result.notified.length + ' aircraft.', 'good');
-    else toast('Check complete: ' + result.military_in_range.length + ' military aircraft in range.', 'good');
+    else if (result.email_sent) toast('Sent ' + result.emails_sent + ' email(s) about ' + result.notified.length + ' aircraft.', 'good');
+    else toast('Check complete: ' + result.military_in_range.length + ' military and ' + result.watch_in_range.length + ' watched aircraft in range.', 'good');
   } catch (error) {
     toast('Check failed: ' + error.message, 'bad');
   } finally {
@@ -396,7 +438,7 @@ async function refreshAlerts() {
     const data = await api('/api/alerts');
     const grouped = new Map();
     for (const alert of data.alerts) {
-      const entry = grouped.get(alert.key) || { key: alert.key, flight: alert.flight, last: alert.sent_at, count: 0 };
+      const entry = grouped.get(alert.key) || { ...alert, last: alert.sent_at, count: 0 };
       entry.count += 1;
       grouped.set(alert.key, entry);
     }
@@ -404,11 +446,12 @@ async function refreshAlerts() {
     $('#alerts-total').textContent = data.total + ' email' + (data.total === 1 ? '' : 's') + ' sent';
     $('#alerts-empty').hidden = rows.length > 0;
     $('#alerts-body').innerHTML = rows.map((row) =>
-      '<tr><td class="mono">' + escapeHtml(row.key.toUpperCase()) + '</td>' +
+      '<tr><td class="mono">' + escapeHtml(row.aircraft.toUpperCase()) + '</td>' +
       '<td class="mono">' + escapeHtml(row.flight || '–') + '</td>' +
+      '<td>' + (row.kind === 'watch' ? '<span class="tag tag-watch">Watchlist · ' + escapeHtml(row.watch) + '</span>' : '<span class="tag tag-mil">Military</span>') + '</td>' +
       '<td title="' + escapeHtml(new Date(row.last * 1000).toLocaleString()) + '">' + escapeHtml(dateTime(row.last)) + ' <span class="muted">(' + ago(row.last) + ')</span></td>' +
       '<td class="num">' + row.count + '</td>' +
-      '<td class="num"><button class="btn btn-danger-ghost" data-reset="' + escapeHtml(row.key) + '">Reset</button></td></tr>'
+      '<td class="num"><button class="btn btn-danger-ghost" data-reset="' + escapeHtml(row.key) + '" data-name="' + escapeHtml(row.aircraft.toUpperCase()) + '">Reset</button></td></tr>'
     ).join('');
   } catch (error) {
     toast('Could not load alerts: ' + error.message, 'bad');
@@ -418,10 +461,11 @@ async function refreshAlerts() {
 $('#alerts-body').addEventListener('click', async (event) => {
   const key = event.target.dataset && event.target.dataset.reset;
   if (!key) return;
-  if (!confirm('Reset ' + key.toUpperCase() + '? It will be able to trigger new emails.')) return;
+  const name = event.target.dataset.name;
+  if (!confirm('Reset ' + name + '? It will be able to trigger new emails.')) return;
   try {
     await api('/api/alerts/' + encodeURIComponent(key), { method: 'DELETE' });
-    toast(key.toUpperCase() + ' reset.', 'good');
+    toast(name + ' reset.', 'good');
     refreshAlerts();
   } catch (error) {
     toast('Reset failed: ' + error.message, 'bad');
@@ -435,7 +479,7 @@ let recipients = [];
 let savedSnapshot = '';
 
 function formValues() {
-  const values = { distribution_list: recipients.slice() };
+  const values = { distribution_list: recipients.slice(), watchlist: watchRowsValues() };
   for (const input of form.querySelectorAll('[name]')) {
     if (input.type === 'checkbox') values[input.name] = input.checked;
     else if (input.type === 'number') values[input.name] = input.value === '' ? null : Number(input.value);
@@ -461,6 +505,10 @@ function fillForm(settings) {
   $('#f-radius-range').value = Math.min(settings.alert_radius_miles, 150);
   recipients = settings.distribution_list.slice();
   renderRecipients();
+  renderWatchRows(settings.watchlist);
+  $('#smtp-password-hint').textContent = settings.smtp_password_set
+    ? 'A password is saved. Leave blank to keep it.'
+    : 'No password saved yet.';
   clearErrors();
   savedSnapshot = JSON.stringify(formValues());
   updateDirty();
@@ -507,12 +555,74 @@ $('#f-radius').addEventListener('input', (event) => { $('#f-radius-range').value
 form.addEventListener('input', updateDirty);
 form.addEventListener('change', updateDirty);
 
+// ----- watchlist rows -----
+
+function watchRow(entry) {
+  const row = $('#watch-row-template').content.firstElementChild.cloneNode(true);
+  row.dataset.id = entry.id || '';
+  row.querySelector('[data-watch="match"]').value = entry.match || '';
+  row.querySelector('[data-watch="label"]').value = entry.label || '';
+  row.querySelector('[data-watch="radius_miles"]').value = entry.radius_miles ?? 10;
+  row.querySelector('[data-watch="recipients"]').value = (entry.recipients || []).join(', ');
+  row.querySelector('[data-watch="subject"]').value = entry.subject || '';
+  row.querySelector('[data-watch="enabled"]').checked = entry.enabled !== false;
+  row.classList.toggle('disabled', entry.enabled === false);
+  return row;
+}
+
+function renderWatchRows(entries) {
+  const container = $('#watch-rows');
+  container.replaceChildren(...entries.map(watchRow));
+  $('#watch-empty').hidden = entries.length > 0;
+}
+
+function watchRowsValues() {
+  return [...document.querySelectorAll('#watch-rows .watch-row')].map((row) => {
+    const get = (field) => row.querySelector('[data-watch="' + field + '"]');
+    const radius = get('radius_miles').value;
+    return {
+      id: row.dataset.id,
+      match: get('match').value.trim().toUpperCase(),
+      label: get('label').value.trim(),
+      radius_miles: radius === '' ? null : Number(radius),
+      recipients: get('recipients').value.split(/[\s,;|]+/).map((v) => v.trim()).filter(Boolean),
+      subject: get('subject').value.trim(),
+      enabled: get('enabled').checked,
+    };
+  });
+}
+
+$('#add-watch').addEventListener('click', () => {
+  const row = watchRow({ radius_miles: 10, enabled: true });
+  $('#watch-rows').appendChild(row);
+  $('#watch-empty').hidden = true;
+  row.querySelector('[data-watch="match"]').focus();
+  updateDirty();
+});
+
+$('#watch-rows').addEventListener('click', (event) => {
+  const remove = event.target.closest('[data-remove-watch]');
+  if (!remove) return;
+  remove.closest('.watch-row').remove();
+  $('#watch-empty').hidden = $('#watch-rows').childElementCount > 0;
+  updateDirty();
+});
+
+$('#watch-rows').addEventListener('change', (event) => {
+  if (event.target.dataset.watch === 'enabled') event.target.closest('.watch-row').classList.toggle('disabled', !event.target.checked);
+});
+
 function clearErrors() {
   form.querySelectorAll('[data-error]').forEach((el) => { el.textContent = ''; });
   form.querySelectorAll('[aria-invalid]').forEach((el) => el.removeAttribute('aria-invalid'));
 }
 
 function showErrors(errors) {
+  const watchError = errors.watchlist && /aircraft #(\d+)/.exec(errors.watchlist);
+  if (watchError) {
+    const row = document.querySelectorAll('#watch-rows .watch-row')[Number(watchError[1]) - 1];
+    if (row) row.querySelector('[data-watch="match"]').setAttribute('aria-invalid', 'true');
+  }
   for (const [field, message] of Object.entries(errors)) {
     const el = form.querySelector('[data-error="' + field + '"]');
     if (el) el.textContent = message.charAt(0).toUpperCase() + message.slice(1) + '.';
@@ -529,17 +639,6 @@ async function loadSettings() {
   } catch (error) {
     toast('Could not load settings: ' + error.message, 'bad');
   }
-  renderSmtp();
-}
-
-function renderSmtp() {
-  const smtp = ui.status && ui.status.smtp;
-  if (!smtp) return;
-  $('#smtp-status').innerHTML = smtp.configured
-    ? '<span class="pill pill-good"><span class="dot"></span>Configured</span>'
-    : '<span class="pill pill-bad"><span class="dot"></span>Missing login</span>';
-  $('#smtp-host').textContent = smtp.hostname || '–';
-  $('#smtp-user').textContent = smtp.username || '–';
 }
 
 form.addEventListener('submit', async (event) => {
@@ -553,6 +652,7 @@ form.addEventListener('submit', async (event) => {
     ui.mapFitted = false;
     fillForm(ui.settings);
     toast('Settings saved.', 'good');
+    refreshAircraft();
     refreshStatus();
   } catch (error) {
     if (error.data && error.data.errors) {
@@ -618,6 +718,30 @@ window.addEventListener('beforeunload', (event) => {
   if (isDirty()) { event.preventDefault(); event.returnValue = ''; }
 });
 
+// ---------- security ----------
+
+$('#change-password').addEventListener('click', async () => {
+  const out = $('#pw-result');
+  const current = $('#pw-current').value;
+  const next = $('#pw-new').value;
+  out.className = 'hint bad';
+  if (next.length < 8) { out.textContent = 'The new password must be at least 8 characters.'; return; }
+  if (next !== $('#pw-confirm').value) { out.textContent = 'The new passwords do not match.'; return; }
+  try {
+    await api('/api/auth/password', { method: 'POST', body: JSON.stringify({ current, new: next }) });
+    ['#pw-current', '#pw-new', '#pw-confirm'].forEach((id) => { $(id).value = ''; });
+    out.className = 'hint ok';
+    out.textContent = 'Password changed. Other browsers have been signed out.';
+  } catch (error) {
+    out.textContent = error.message;
+  }
+});
+
+$('#sign-out').addEventListener('click', async () => {
+  try { await api('/api/auth/logout', { method: 'POST' }); } catch (_) { /* going to login anyway */ }
+  location.replace('/login');
+});
+
 // ---------- log ----------
 
 async function refreshLog() {
@@ -647,7 +771,7 @@ try {
 } catch (_) { /* storage blocked */ }
 
 showTab(ui.tab);
-refreshStatus().then(renderSmtp);
+refreshStatus();
 setInterval(refreshStatus, 5000);
 setInterval(renderStatus, 1000);
 setInterval(refreshAircraft, 3000);

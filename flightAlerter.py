@@ -3,6 +3,7 @@ import logging
 import pandas as pd
 import requests
 import smtplib
+import ssl
 import threading
 import time
 import os
@@ -14,12 +15,16 @@ from email.utils import formataddr
 from datetime import datetime
 from os.path import exists
 
+import secret_store
 import settings as config
 
 
 logger = logging.getLogger('flightAlerter')
 
 AIRCRAFT_DB_CACHE = {}
+# The receiver's database is split into shard files; cache them so per-aircraft lookups stay cheap.
+DB_SHARD_CACHE = {}
+DB_SHARD_TTL_SECONDS = 24 * 3600
 SENT_ALERTS_FILENAME = './sentAlerts.csv'
 SENT_ALERT_COLUMNS = ['flight_num', 'flight_name', 'sent_time']
 # Guards sentAlerts.csv, which both the check loop and the web UI touch.
@@ -59,6 +64,27 @@ def get_aircraft_db_url(aircraft_data_url):
     return aircraft_data_url.rsplit('/', 1)[0] + '/db'
 
 
+def fetch_db_shard(db_url, block_key, timeout_seconds):
+    """Returns the shard dict, {} if the shard doesn't exist, or None on a transient error."""
+    cache_key = db_url + '/' + block_key
+    cached = DB_SHARD_CACHE.get(cache_key)
+    if cached and time.time() - cached[0] < DB_SHARD_TTL_SECONDS:
+        return cached[1]
+
+    try:
+        response = requests.get(db_url + '/' + block_key + '.json', timeout=timeout_seconds)
+        if response.status_code == 404:
+            shard_data = {}
+        else:
+            response.raise_for_status()
+            shard_data = response.json()
+    except (requests.exceptions.RequestException, ValueError):
+        return None
+
+    DB_SHARD_CACHE[cache_key] = (time.time(), shard_data)
+    return shard_data
+
+
 def fetch_aircraft_db_record(db_url, aircraft_hex, timeout_seconds=5):
     if not aircraft_hex:
         return {}
@@ -74,17 +100,9 @@ def fetch_aircraft_db_record(db_url, aircraft_hex, timeout_seconds=5):
         block_key = icao[:level]
         data_key = icao[level:]
 
-        try:
-            response = requests.get(db_url + '/' + block_key + '.json', timeout=timeout_seconds)
-            if response.status_code == 404:
-                AIRCRAFT_DB_CACHE[icao] = {}
-                return {}
-
-            response.raise_for_status()
-            shard_data = response.json()
-        except (requests.exceptions.RequestException, ValueError):
-            AIRCRAFT_DB_CACHE[icao] = {}
-            return {}
+        shard_data = fetch_db_shard(db_url, block_key, timeout_seconds)
+        if shard_data is None:
+            return {}  # transient failure: don't cache, try again next time
 
         if data_key in shard_data:
             AIRCRAFT_DB_CACHE[icao] = shard_data[data_key]
@@ -147,23 +165,34 @@ def fetch_aircraft_data(url, timeout_seconds=10, max_attempts=3, retry_delay_sec
     return None
 
 
-def smtp_config():
-    """SMTP credentials come only from the environment (.env), never from settings.json."""
-    username = os.environ.get('SMTP_USERNAME', '')
-    password = os.environ.get('SMTP_PASSWORD', '')
+def smtp_config(settings):
+    password = secret_store.get('smtp_password') or ''
     return {
-        'hostname': os.environ.get('SMTP_HOSTNAME', 'smtp.zoho.com'),
-        'port': int(os.environ.get('SMTP_PORT', '465')),
-        'username': username,
+        'hostname': settings['smtp_hostname'],
+        'port': settings['smtp_port'],
+        'security': settings['smtp_security'],
+        'username': settings['smtp_username'],
         'password': password,
-        'from_name': os.environ.get('SMTP_FROM_NAME', 'Flight Alerter'),
-        'configured': bool(username and password),
+        'from_name': settings['smtp_from_name'],
+        'configured': bool(settings['smtp_hostname'] and settings['smtp_username'] and password),
     }
 
 
-def annotate_aircraft(flight, home_coords):
+def normalize_ident(value):
+    return re.sub(r'[^A-Z0-9]', '', str(value or '').upper())
+
+
+def watch_entries_for(flight, watchlist):
+    """Watchlist entries matching this aircraft by callsign, hex code or registration (tail number)."""
+    idents = {normalize_ident(flight.get(field)) for field in ('flight', 'hex', 'r')} - {''}
+    return [entry for entry in watchlist if entry['enabled'] and normalize_ident(entry['match']) in idents]
+
+
+def annotate_aircraft(flight, home_coords, db_url, watchlist):
     flight['distance'] = round(geopy.distance.distance(home_coords, (flight['lat'], flight['lon'])).mi, 1)
+    enrich_flight_with_aircraft_db(flight, db_url)
     flight['military'] = is_military_aircraft(flight)
+    flight['watch_entries'] = watch_entries_for(flight, watchlist)
     return flight
 
 
@@ -181,8 +210,14 @@ def summarize_aircraft(flight):
         'squawk': flight.get('squawk'),
         'distance': flight.get('distance'),
         'military': bool(flight.get('military')),
+        'watched': [{'id': entry['id'], 'label': watch_label(entry), 'radius_miles': entry['radius_miles']}
+                    for entry in flight.get('watch_entries', [])],
         'seen': flight.get('seen'),
     }
+
+
+def watch_label(entry):
+    return entry.get('label') or entry['match']
 
 
 def load_sent_alerts():
@@ -195,14 +230,14 @@ def save_sent_alerts(sent_alerts):
     sent_alerts.to_csv(SENT_ALERTS_FILENAME, index=False)
 
 
-def alert_key(flight):
-    return str(flight.get('hex') or flight.get('flight') or 'unknown').strip().lower() or 'unknown'
+def alert_key(flight, prefix=''):
+    return prefix + (str(flight.get('hex') or flight.get('flight') or 'unknown').strip().lower() or 'unknown')
 
 
-def select_eligible_flights(flights, sent_alerts, settings, current_timestamp):
+def select_eligible_flights(flights, sent_alerts, settings, current_timestamp, key_prefix=''):
     eligible_flights = []
     for flight_info in flights:
-        aircraft_registration = alert_key(flight_info)
+        aircraft_registration = alert_key(flight_info, key_prefix)
         past_alerts = sent_alerts.loc[sent_alerts['flight_num'] == aircraft_registration]
 
         if len(past_alerts) >= settings['max_alerts_per_aircraft']:
@@ -214,7 +249,7 @@ def select_eligible_flights(flights, sent_alerts, settings, current_timestamp):
             if elapsed_minutes <= settings['realert_minutes']:
                 continue
 
-        flight_info['aircraft_registration'] = aircraft_registration
+        flight_info = dict(flight_info, aircraft_registration=aircraft_registration)
         eligible_flights.append(flight_info)
     return eligible_flights
 
@@ -229,7 +264,9 @@ def run_check(settings):
         'aircraft_positioned': 0,
         'military_seen': [],
         'military_in_range': [],
+        'watch_in_range': [],
         'notified': [],
+        'emails_sent': 0,
         'email_sent': False,
     }
 
@@ -247,7 +284,8 @@ def run_check(settings):
     aircraft = json_dump.get('aircraft', [])
     result['aircraft_total'] = len(aircraft)
 
-    military_in_range = []
+    # (entry, [flights]) for each watchlist entry with a matching aircraft inside its own radius
+    watch_hits = {}
     for flight in aircraft:
         if flight.get('seen', 999) >= settings['max_seen_seconds']:
             continue
@@ -255,48 +293,66 @@ def run_check(settings):
             continue
         result['aircraft_positioned'] += 1
 
-        annotate_aircraft(flight, home_coords)
-        if not flight['military']:
-            continue
+        annotate_aircraft(flight, home_coords, aircraft_db_url, settings['watchlist'])
+        for entry in flight['watch_entries']:
+            if flight['distance'] <= entry['radius_miles']:
+                watch_hits.setdefault(entry['id'], (entry, []))[1].append(flight)
+                result['watch_in_range'].append(flight)
 
-        result['military_seen'].append(flight)
-        if flight['distance'] <= settings['alert_radius_miles']:
-            military_in_range.append(flight)
+        if flight['military']:
+            result['military_seen'].append(flight)
+            if flight['distance'] <= settings['alert_radius_miles']:
+                result['military_in_range'].append(flight)
 
-    for flight in result['military_seen']:
-        enrich_flight_with_aircraft_db(flight, aircraft_db_url)
-    result['military_in_range'] = military_in_range
+    # Each batch is one email: all military aircraft together, then one per watchlist entry.
+    batches = [(settings['subject'], settings['distribution_list'], 'Military aircraft within range', '',
+                result['military_in_range'])]
+    for entry, flights in watch_hits.values():
+        subject = entry['subject'] or (watch_label(entry) + ' is within ' + str(entry['radius_miles']) + ' mi')
+        batches.append((subject, entry['recipients'] or settings['distribution_list'],
+                        watch_label(entry) + ' within range', 'watch:' + entry['id'] + ':', flights))
 
     with SENT_ALERTS_LOCK:
         sent_alerts = load_sent_alerts()
-        eligible_flights = select_eligible_flights(military_in_range, sent_alerts, settings, time.time())
+        for subject, recipients, heading, key_prefix, flights in batches:
+            eligible_flights = select_eligible_flights(flights, sent_alerts, settings, time.time(), key_prefix)
+            if not eligible_flights:
+                continue
+            result['notified'].extend(eligible_flights)
+            if not settings['send_emails']:
+                # Not logged as sent, so they alert once emails are switched back on.
+                logger.info('Emails are off; would have sent "' + subject + '" about ' + str(len(eligible_flights)) + ' aircraft.')
+                continue
+            send_email(eligible_flights, subject, recipients, heading, settings)
+            sent_alerts = write_alert_log(eligible_flights, sent_alerts)
+            save_sent_alerts(sent_alerts)
+            result['emails_sent'] += 1
 
-        if not eligible_flights:
-            logger.info('Checked ' + str(result['aircraft_positioned']) + ' aircraft; '
-                        + str(len(military_in_range)) + ' military in range, none due a notification.')
-        elif not settings['send_emails']:
-            # Not logged as sent, so they alert once emails are switched back on.
-            logger.info('Emails are off; would have notified about ' + str(len(eligible_flights)) + ' aircraft.')
-        else:
-            send_email(eligible_flights, settings, smtp_config())
-            save_sent_alerts(write_alert_log(eligible_flights, sent_alerts))
-            result['email_sent'] = True
-        result['notified'] = eligible_flights
-
+    result['email_sent'] = result['emails_sent'] > 0
+    if not result['notified']:
+        logger.info('Checked ' + str(result['aircraft_positioned']) + ' aircraft; '
+                    + str(len(result['military_in_range'])) + ' military and '
+                    + str(len(result['watch_in_range'])) + ' watched in range, none due a notification.')
     result['ok'] = True
     return result
 
 
 def send_message(subject, message_text, recipients, smtp):
     if not smtp['configured']:
-        raise RuntimeError('SMTP_USERNAME and SMTP_PASSWORD are not set in .env')
+        raise RuntimeError('The email server is not set up. Add the SMTP server, username and password in Settings.')
 
     msg = MIMEText(message_text, 'plain', 'utf-8')
     msg['Subject'] = Header(subject, 'utf-8')
     msg['From'] = formataddr((str(Header(smtp['from_name'], 'utf-8')), smtp['username']))
     msg['To'] = ', '.join(recipients)
 
-    server = smtplib.SMTP_SSL(smtp['hostname'], smtp['port'], timeout=30)
+    # create_default_context() verifies the server certificate; smtplib's own default does not.
+    context = ssl.create_default_context()
+    if smtp['security'] == 'starttls':
+        server = smtplib.SMTP(smtp['hostname'], smtp['port'], timeout=30)
+        server.starttls(context=context)
+    else:
+        server = smtplib.SMTP_SSL(smtp['hostname'], smtp['port'], timeout=30, context=context)
     try:
         server.login(smtp['username'], smtp['password'])
         server.sendmail(smtp['username'], recipients, msg.as_string())
@@ -304,10 +360,10 @@ def send_message(subject, message_text, recipients, smtp):
         server.quit()
 
 
-def send_email(flights, settings, smtp):
+def send_email(flights, subject, recipients, heading, settings):
     flights_sorted = sorted(flights, key=lambda item: item.get('distance', 9999))
     message_lines = [
-        'Military aircraft within range: ' + str(len(flights_sorted)),
+        heading + ': ' + str(len(flights_sorted)),
         ''
     ]
 
@@ -316,22 +372,24 @@ def send_email(flights, settings, smtp):
         message_lines.append('Distance: ' + str(flight_info.get('distance', 'unknown')) + ' miles')
         message_lines.append('Type: ' + get_aircraft_type(flight_info))
         message_lines.append('Flight: ' + str(flight_info.get('flight', 'unknown')))
+        message_lines.append('Registration: ' + str(flight_info.get('r', 'unknown')))
         message_lines.append('Hex: ' + str(flight_info.get('hex', 'unknown')))
-        message_lines.append('Registration Key: ' + str(flight_info.get('aircraft_registration', 'unknown')))
         message_lines.append('All Stats:')
         for key in sorted(flight_info.keys()):
+            if key in ('watch_entries', 'aircraft_registration'):
+                continue
             message_lines.append('  ' + str(key) + ': ' + str(flight_info.get(key)))
         message_lines.append('')
 
-    subject = settings['subject'] + ' (' + str(len(flights_sorted)) + ')'
-    send_message(subject, '\r\n'.join(message_lines), settings['distribution_list'], smtp)
-    logger.info('Summary email sent for ' + str(len(flights_sorted)) + ' military aircraft')
+    full_subject = subject + ' (' + str(len(flights_sorted)) + ')'
+    send_message(full_subject, '\r\n'.join(message_lines), recipients, smtp_config(settings))
+    logger.info('Email "' + full_subject + '" sent to ' + str(len(recipients)) + ' recipient(s)')
 
 
 def send_test_email(settings):
     send_message(settings['subject'] + ' (test)',
                  'This is a test message from Flight Alerter. If you can read this, email alerts are working.',
-                 settings['distribution_list'], smtp_config())
+                 settings['distribution_list'], smtp_config(settings))
     logger.info('Test email sent to ' + ', '.join(settings['distribution_list']))
 
 
@@ -342,7 +400,7 @@ def write_alert_log(flights, sent_alerts):
     for flight_info in flights:
         new_rows.append({
             'flight_num': flight_info.get('aircraft_registration', 'unknown'),
-            'flight_name': flight_info.get('flight', 'unknown'),
+            'flight_name': str(flight_info.get('flight') or '').strip() or flight_info.get('r') or 'unknown',
             'sent_time': timestamp
         })
 

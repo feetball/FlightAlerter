@@ -3,3 +3,5 @@ venv/
 __pycache__/
 settings.json
 settings.json.tmp
+secrets.json
+secrets.json.tmp

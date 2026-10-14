@@ -1,64 +1,64 @@
 # flightAlerter
 
-Sends an email when a military aircraft flies within a set radius of your location.
-It reads live positions from your own ADS-B receiver.
+Sends an email when a military aircraft, or an aircraft on your watchlist, flies near
+your location. It reads live positions from your own ADS-B receiver.
 
-Every minute it fetches `aircraft.json` from a SkyAware / tar1090 / readsb receiver.
-It keeps aircraft that look military and are inside the alert radius, then sends one
-summary email listing them by distance. Each email includes the aircraft type, which
-is looked up in the receiver's aircraft database.
+Every minute it fetches `aircraft.json` from a SkyAware / tar1090 / readsb receiver and
+sends email for:
 
-It also serves a web dashboard (port 8095) with:
+- **Military aircraft** within the alert radius, in one summary email listing them by
+  distance
+- **Watchlist aircraft** within their own radius. Each entry has its own recipients and
+  subject, and can be matched by tail number, callsign or ICAO hex code.
 
-- a live map of traffic, with military aircraft highlighted and the alert radius drawn
+Aircraft type and registration are looked up in the receiver's aircraft database. That
+means a tail number on the watchlist is recognised even when the aircraft isn't
+broadcasting it as its callsign.
+
+A password-protected web dashboard (port 8095) shows:
+
+- a live map of traffic, with military and watchlist aircraft highlighted and the alert
+  radius drawn
 - status: last and next check, aircraft counts, last email, recent errors
 - the history of sent alerts, with a button to reset any aircraft
-- a settings page for the radius, recipients, home location, receiver URL and timing
+- settings for everything, including the watchlist and the email server
 - an activity log
 
 ## Requirements
 
 - An ADS-B receiver that serves `.../data/aircraft.json` and the matching `.../db/`
   aircraft database (SkyAware and tar1090 both do)
-- An SMTP account that can send mail over SSL (an app password is recommended)
+- An SMTP account that can send mail over SSL/TLS or STARTTLS (an app password is
+  recommended)
 - Docker and docker-compose, or Python 3 to run it without Docker
 
 ## Setup
 
-1. Copy the example environment file and fill it in:
+1. Optionally, create a `.env` file from the example to pre-fill settings:
 
    ```sh
    cp .env.example .env
    chmod 600 .env
    ```
 
-   | Variable            | Description                                                   |
-   |---------------------|---------------------------------------------------------------|
-   | `SMTP_HOSTNAME`     | SMTP server (default `smtp.zoho.com`)                         |
-   | `SMTP_PORT`         | SMTP SSL port (default `465`)                                 |
-   | `SMTP_USERNAME`     | Login and From address; also the default recipient           |
-   | `SMTP_PASSWORD`     | SMTP password or app password                                 |
-   | `HOME_LAT`          | Latitude that distances are measured from                     |
-   | `HOME_LON`          | Longitude that distances are measured from                    |
-   | `AIRCRAFT_DATA_URL` | Full URL to the receiver's `aircraft.json`                     |
-   | `SMTP_FROM_NAME`    | Display name on outgoing email (default `Flight Alerter`)     |
-   | `WEB_PASSWORD`      | Optional. If set, the dashboard asks for this password        |
-   | `WEB_PORT`          | Optional. Dashboard port (default `8095`)                      |
+   These values are only used on the first start. You can skip this and enter
+   everything in the dashboard instead. Once the service has started, you can remove
+   the SMTP password from `.env`.
 
-   `.env` is git-ignored and excluded from the Docker image. Never commit it.
+2. Start the service (see below) and open `http://<host>:8095`.
 
-2. Start it (see below) and open `http://<host>:8095`. Everything except the SMTP login
-   can be changed on the **Settings** page.
+3. On first visit you'll be asked to create an admin password. To prove you run the
+   server, enter the one-time setup code printed in its log:
 
-### Where settings live
+   ```sh
+   docker logs flightalerter-flightalerter-1 | grep "setup code"
+   ```
 
-Settings are saved to `settings.json`, which is git-ignored. On first start it is
-created from `HOME_LAT`, `HOME_LON` and `AIRCRAFT_DATA_URL` in `.env`, and from
-`militaryFlights.csv` if that file exists. After that, `settings.json` takes priority, so
-change those values on the Settings page rather than in `.env`.
+   If `WEB_PASSWORD` is set in `.env`, it becomes the initial password and no setup
+   code is needed.
 
-The SMTP username and password are only ever read from `.env`. The dashboard never
-shows or stores the password.
+4. Fill in the **Settings** page: receiver URL, home location, recipients, email server,
+   watchlist. Use **Send test email** to check the email settings.
 
 ## Running
 
@@ -68,26 +68,56 @@ With Docker:
 docker-compose up -d --build
 ```
 
-The dashboard is then at `http://<host>:8095`. The container runs the code from this
-folder (mounted at `/code`), so `settings.json` and `sentAlerts.csv` survive rebuilds.
+The container runs the code from this folder (mounted at `/code`), so settings and
+alert history survive rebuilds.
 
 Without Docker:
 
 ```sh
 python3 -m venv venv
 venv/bin/pip install -r requirements.txt
-set -a; . ./.env; set +a
 venv/bin/python app.py
 ```
 
 `venv/bin/python flightAlerter.py` runs a single check without the web server, which is
 handy for cron or testing.
 
-### Security
+## Files
 
-The dashboard has no login unless `WEB_PASSWORD` is set. Anyone who can reach the port
-can change settings, pause alerts and send test emails. Set a password, or keep the
-port off the internet.
+| File               | Contents                                                    | In git? |
+|--------------------|-------------------------------------------------------------|---------|
+| `settings.json`    | All settings except passwords                               | No      |
+| `secrets.json`     | SMTP password, admin password hash, session signing key     | No      |
+| `sentAlerts.csv`   | Which aircraft have been emailed, and when                  | Yes     |
+| `.env`             | Optional first-start values (see `.env.example`)            | No      |
+
+`militaryFlights.csv` and `monitoredFlights.csv` are the old config files. If they
+exist on first start, their values are imported into `settings.json` and the
+watchlist. After that they are ignored.
+
+## Security
+
+- **Login.** Every page and API call needs a login. The admin password is stored only
+  as a salted PBKDF2 hash. Sessions use an HttpOnly, SameSite=Strict cookie and last
+  30 days.
+- **Changing the password** signs out every other browser. Signing out only clears the
+  cookie in that browser, so change the password if you think a session was stolen.
+- **Wrong passwords.** After 5 wrong attempts, logins from that address are refused
+  for 15 minutes.
+- **Forged requests.** Every request that changes something must carry a custom header,
+  which blocks cross-site request forgery. Pages are sent with a strict Content Security
+  Policy and can't be embedded in frames.
+- **SMTP password.** It's write-only in the UI: it is never sent back to the browser or
+  written to the log. It's stored in plain text in `secrets.json`, which only its owner
+  can read, as `.env` was before.
+- **Certificates.** Email is sent over TLS, and the mail server's certificate is
+  verified.
+- **HTTPS.** The dashboard itself speaks plain HTTP. Keep it on your LAN. To reach it
+  from outside, put it behind a reverse proxy with HTTPS and set `WEB_HTTPS=1` so the
+  session cookie is only sent over HTTPS.
+
+**Forgot the admin password?** Delete the `admin_password_hash` line from
+`secrets.json` and restart. A new setup code will be printed in the log.
 
 ## How aircraft are classified as military
 
@@ -103,9 +133,10 @@ are skipped.
 
 ## Alert limits
 
-Sent alerts are logged in `sentAlerts.csv`, keyed by ICAO hex code. By default each
-aircraft triggers at most two emails, at least 30 minutes apart; both limits can be
-changed in Settings. To let an aircraft alert again, reset it on the **Alerts** page.
+Sent alerts are logged in `sentAlerts.csv`. By default each aircraft triggers at most
+two emails, at least 30 minutes apart; both limits can be changed in Settings. Military
+and watchlist alerts are counted separately. To let an aircraft alert again, reset it on
+the **Alerts** page.
 
 While **Send emails** is off, nothing is recorded, so aircraft still in range alert
 once emails are turned back on.
