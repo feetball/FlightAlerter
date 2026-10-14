@@ -111,6 +111,9 @@ const map = L.map('map', { zoomControl: true, attributionControl: true, preferCa
 L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 18,
   className: 'map-tiles',
+  // OSM's tile policy rejects requests without a Referer, which the page-wide same-origin policy strips.
+  // Send just the origin (no path) for tiles.
+  referrerPolicy: 'strict-origin-when-cross-origin',
   attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
 }).addTo(map);
 
