@@ -366,6 +366,7 @@ def api_aircraft():
         'home': {'lat': settings['home_lat'], 'lon': settings['home_lon']},
         'radius_miles': settings['alert_radius_miles'],
         'watchlist': [{'id': entry['id'], 'label': alerter.watch_label(entry), 'match': entry['match'],
+                       'idents': alerter.watch_idents(entry),
                        'radius_miles': entry['radius_miles'], 'enabled': entry['enabled']}
                       for entry in settings['watchlist']],
         'aircraft': aircraft,

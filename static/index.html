@@ -204,7 +204,7 @@
               Add aircraft
             </button>
           </div>
-          <p class="hint help-tight">Get an email when a specific aircraft comes within its own radius, military or not. Match by tail number (N251BP), callsign (SWA2713) or ICAO hex code (A1B2C3). Leave recipients or subject blank to use the defaults above.</p>
+          <p class="hint help-tight">Get an email when a specific aircraft comes within its own radius, military or not. Match by tail number (N251BP), callsign (SWA2713) or ICAO hex code (A1B2C3). To give several aircraft the same settings, list them in one entry separated by commas. Leave recipients or subject blank to use the defaults above; in the subject, &lt;aircraft&gt; and &lt;radius&gt; are filled in.</p>
           <div id="watch-rows" class="watch-rows"></div>
           <p id="watch-empty" class="empty" hidden>No aircraft on the watchlist.</p>
           <div class="error" data-error="watchlist"></div>
@@ -331,7 +331,7 @@
     <div class="watch-row">
       <div class="field">
         <label>Aircraft</label>
-        <input type="text" data-watch="match" placeholder="N251BP" maxlength="20" spellcheck="false" autocomplete="off">
+        <textarea data-watch="match" rows="1" placeholder="N251BP" maxlength="1000" spellcheck="false" autocomplete="off"></textarea>
       </div>
       <div class="field">
         <label>Nickname</label>

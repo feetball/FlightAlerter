@@ -18,6 +18,7 @@ EMAIL_PATTERN = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 HOSTNAME_PATTERN = re.compile(r'^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$')
 IDENT_PATTERN = re.compile(r'^[A-Za-z0-9-]{1,20}$')
 MAX_WATCHLIST_ENTRIES = 100
+MAX_AIRCRAFT_PER_ENTRY = 50
 
 # Reentrant so update_settings can hold it across load_settings() and the write.
 _lock = threading.RLock()
@@ -222,12 +223,29 @@ def _as_security(value):
     return value
 
 
+def _as_watch_match(value):
+    """One or more tail numbers, callsigns or hex codes, stored as "N324FX, N268FX"."""
+    parts = value if isinstance(value, list) else re.split(r'[\s,;|]+', str(value or ''))
+    idents = []
+    for part in parts:
+        ident = str(part).strip().upper()
+        if not ident:
+            continue
+        if not IDENT_PATTERN.match(ident):
+            raise ValueError('"' + ident[:20] + '" is not a tail number, callsign or hex code (letters, digits and dashes only)')
+        if ident not in idents:
+            idents.append(ident)
+    if not idents:
+        raise ValueError('needs a tail number, callsign or hex code')
+    if len(idents) > MAX_AIRCRAFT_PER_ENTRY:
+        raise ValueError('can list at most ' + str(MAX_AIRCRAFT_PER_ENTRY) + ' aircraft')
+    return ', '.join(idents)
+
+
 def _as_watch_entry(value):
     if not isinstance(value, dict):
         raise ValueError('each entry must be an object')
-    match = str(value.get('match', '')).strip().upper()
-    if not IDENT_PATTERN.match(match):
-        raise ValueError('"' + match[:20] + '" is not a tail number, callsign or hex code (letters, digits and dashes only)')
+    match = _as_watch_match(value.get('match', ''))
     entry_id = str(value.get('id') or '')
     if not re.match(r'^[a-f0-9]{8}$', entry_id):
         entry_id = secrets.token_hex(4)
@@ -246,13 +264,13 @@ def _as_watchlist(value):
     if not isinstance(value, list):
         raise ValueError('must be a list')
     if len(value) > MAX_WATCHLIST_ENTRIES:
-        raise ValueError('can have at most ' + str(MAX_WATCHLIST_ENTRIES) + ' aircraft')
+        raise ValueError('can have at most ' + str(MAX_WATCHLIST_ENTRIES) + ' entries')
     entries = []
     for index, item in enumerate(value, start=1):
         try:
             entries.append(_as_watch_entry(item))
         except ValueError as exc:
-            raise ValueError('aircraft #' + str(index) + ': ' + str(exc))
+            raise ValueError('entry #' + str(index) + ': ' + str(exc))
     return entries
 
 
